@@ -1,0 +1,29 @@
+schema: spec-driven
+
+context: |
+  Project: Slack Video Assistant.
+  Runtime: OpenCode coordinated by the real Orca runtime.
+  Planned stack: Python, Slack Bolt, Socket Mode, Claude Agent SDK, FFmpeg, and optional Whisper.
+  MVP input: MP4 up to 100 MB and 5 minutes.
+  MVP output: MP4 with H.264 video and AAC audio.
+  User-facing language: English.
+  The bot explains videos with a summary, key points, and timestamps when available.
+  Export requests require a suggested format and centered crop confirmation.
+  Temporary media and derived artifacts are deleted after processing.
+  QA uses mocks and repository-owned video fixtures because no live Slack workspace is assumed.
+  Repository agents are named orca and backend-dev.
+
+rules:
+  proposal:
+    - Include explicit scope, non-goals, risks, and human approval gates.
+    - Do not create product backlog cards from a proposal without user authorization.
+  design:
+    - Describe Slack event flow, asynchronous media processing, Claude boundaries, cleanup, and failure handling.
+    - State which behavior is mocked and which behavior is verified against a real service.
+  specs:
+    - Use numbered, observable requirements and scenarios.
+    - Define file size, duration, format, retention, and security behavior when media is involved.
+  tasks:
+    - Assign backend implementation tasks to backend-dev.
+    - Include tests, fixtures, validation commands, predecessors, and an OpenSpec reference or exception.
+    - Keep tasks small enough for one branch and one pull request.

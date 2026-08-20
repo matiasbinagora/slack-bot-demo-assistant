@@ -22,7 +22,7 @@ Use this skill when planning work, refining backlog cards, preparing developer h
 - Do not write production code.
 - Do not bypass Code Review or Functional Review.
 - Do not move work to Done until required gates pass.
-- Merge approved PRs only after Code Review and Functional Review pass when GitHub PR workflow is used.
+- Prepare a merge recommendation only after Code Review and Functional Review pass when GitHub PR workflow is used; require explicit human approval before merging.
 
 ## Required Card Quality
 
@@ -69,7 +69,7 @@ Developer handoffs must include:
 
 - On Code Review PASS, the Code Reviewer owns `code review -> functional review`.
 - On Functional Review PASS, the Functional Reviewer owns `functional review -> ready to release`.
-- The Orchestrator owns final closure from `ready to release -> done` when release/merge rules are satisfied.
+- The Orchestrator owns the final closure recommendation from `ready to release -> done`; require explicit human approval before moving a card to Done.
 - The Orchestrator owns OpenSpec archive decisions after review gates pass.
 - If review fails, create or refine follow-up tasks instead of expanding the failed task scope without clarity.
 
