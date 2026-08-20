@@ -6,6 +6,7 @@ This document covers the local-only Slack foundation implemented for `DAY-2-TASK
 
 - Python Slack Bolt application startup through Socket Mode.
 - Environment-backed configuration for `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` only.
+- Python 3.10 or newer for the local editable install and test workflow.
 - Secret-free local setup instructions.
 
 ## Out of scope for this slice
@@ -26,9 +27,23 @@ LOG_LEVEL=INFO
 
 Do not commit tokens, workspace URLs, channel IDs, or private Slack file links.
 
+## Clean-checkout local environment
+
+Use a local Python 3.10+ interpreter and create the virtual environment from a clean checkout:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pip install -e ".[dev]"
+```
+
+The `-e .` command installs the local package entrypoint, and `-e ".[dev]"` adds the approved test dependency set for repository validation.
+
 ## Entrypoint
 
-Use one of these local entrypoints after creating a local virtual environment:
+Use one of these local entrypoints after creating the local virtual environment and installing the package:
 
 ```text
 .venv/bin/python -m slack_video_assistant
@@ -62,3 +77,4 @@ The exact additional permissions may vary by workspace policy, channel type, and
 - Tests run with mocked Slack Bolt / Socket Mode behavior only.
 - No Slack credentials are required for the repository test suite.
 - No live network, live Slack workspace, or live Claude account is required for this task.
+- Slack live QA and Claude live calls were not run for this repository slice.

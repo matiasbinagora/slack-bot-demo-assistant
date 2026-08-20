@@ -88,7 +88,7 @@ The Trello and GitHub MCP gateways use the ignored `.env.mcp` file. Each worktre
 
 Required media tooling for the planned local pipeline:
 
-- Python 3
+- Python 3.10+
 - FFmpeg
 - FFprobe
 - Whisper only if local audio transcription is enabled
