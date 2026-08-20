@@ -2,7 +2,7 @@
 
 ### Requirement: Slack credentials and application configuration
 
-The application SHALL read `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` only from the process environment and SHALL document the required Socket Mode setup, event subscriptions, and scopes without storing credential values in the repository.
+The application SHALL read `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` only from the process environment and SHALL document the required Socket Mode setup, Python 3.10+ local setup, event subscriptions, and scopes without storing credential values in the repository.
 
 #### Scenario: Valid local configuration
 
@@ -13,6 +13,11 @@ The application SHALL read `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` only from the
 
 - **WHEN** a required Slack token is absent
 - **THEN** startup fails with a safe configuration error that does not print the token, private URL, or other secret value
+
+#### Scenario: Clean checkout local setup
+
+- **WHEN** a developer starts from a clean repository checkout
+- **THEN** the documented setup provides virtual environment creation plus the minimal editable and dev dependency installation commands needed to run the local Socket Mode foundation tests without live Slack credentials
 
 ### Requirement: Socket Mode lifecycle
 

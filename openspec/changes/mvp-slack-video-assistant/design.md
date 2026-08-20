@@ -26,7 +26,7 @@ Las restricciones principales son: MP4 de hasta 100 MB y 5 minutos, respuestas d
 
 ### 1. Socket Mode con Slack Bolt y configuración por entorno
 
-El proceso usará Slack Bolt con Socket Mode. `SLACK_BOT_TOKEN` y `SLACK_APP_TOKEN` se leerán exclusivamente del entorno; la aplicación fallará de forma explícita si falta una credencial obligatoria. La configuración documentará los eventos y scopes mínimos para leer archivos y publicar respuestas, incluyendo `files:read` y `chat:write` cuando el workspace los requiera.
+El proceso usará Slack Bolt con Socket Mode. `SLACK_BOT_TOKEN` y `SLACK_APP_TOKEN` se leerán exclusivamente del entorno; la aplicación fallará de forma explícita si falta una credencial obligatoria. La configuración documentará los eventos y scopes mínimos para leer archivos y publicar respuestas, incluyendo `files:read` y `chat:write` cuando el workspace los requiera. Para esta base local se soportará Python 3.10 o superior: el código actual usa sintaxis y typing compatibles con 3.10+, y Slack Bolt 1.30.0 mantiene compatibilidad por encima de esa línea base, por lo que no se justifica restringir el MVP a 3.14.
 
 **Alternativas consideradas:** HTTP Events API habría requerido una URL pública y despliegue adicional; se descarta para el MVP local-first. Un polling de Slack no ofrece una interacción adecuada ni reduce la complejidad de permisos.
 
@@ -79,7 +79,7 @@ Si la implementación aprobada cambia comportamiento observable, dependencias op
 
 ## Migration Plan
 
-1. Documentar la configuración Slack y Claude sin valores secretos.
+1. Documentar la configuración Slack y Claude sin valores secretos, incluyendo la creación de `.venv` y la instalación editable/dev mínima para un checkout limpio.
 2. Añadir el entrypoint y el adaptador Slack con handlers sin procesamiento pesado.
 3. Añadir el cliente Claude mockeable y el pipeline de comprensión con fixtures.
 4. Añadir el pipeline de exportación y validación FFprobe.
