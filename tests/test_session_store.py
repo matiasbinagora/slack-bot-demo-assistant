@@ -43,3 +43,44 @@ def test_session_store_rejects_out_of_order_confirm_and_duplicate_export() -> No
     assert duplicate_export.state_changed is False
     assert cancelled.reason == "cancellation_consumed"
     assert duplicate_cancel.reason == "nothing_to_cancel"
+
+
+def test_session_store_blocks_invalid_terminal_and_pending_transitions() -> None:
+    store = ThreadSessionStore()
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+
+    explain_while_pending = store.apply_command(key, CanonicalCommand.EXPLAIN)
+    confirm = store.apply_command(key, CanonicalCommand.CONFIRM)
+    explain_after_confirm = store.apply_command(key, CanonicalCommand.EXPLAIN)
+    export_after_confirm = store.apply_command(key, CanonicalCommand.EXPORT)
+
+    assert explain_while_pending.reason == "export_confirmation_pending"
+    assert explain_while_pending.state_changed is False
+    assert confirm.reason == "confirmation_consumed"
+    assert explain_after_confirm.reason == "explanation_no_longer_available"
+    assert export_after_confirm.reason == "export_no_longer_available"
+    assert export_after_confirm.state_changed is False
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.CONFIRMATION_CONSUMED
+
+
+def test_session_store_does_not_reopen_cancelled_sessions() -> None:
+    store = ThreadSessionStore()
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+    cancel = store.apply_command(key, CanonicalCommand.CANCEL)
+    export_after_cancel = store.apply_command(key, CanonicalCommand.EXPORT)
+    explain_after_cancel = store.apply_command(key, CanonicalCommand.EXPLAIN)
+
+    assert cancel.reason == "cancellation_consumed"
+    assert export_after_cancel.reason == "export_no_longer_available"
+    assert explain_after_cancel.reason == "explanation_no_longer_available"
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.CANCELLATION_CONSUMED

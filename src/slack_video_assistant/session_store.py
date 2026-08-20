@@ -64,22 +64,20 @@ class ThreadSessionStore:
             return TransitionResult(state_changed=False, session=None, reason="missing_session")
 
         if command is CanonicalCommand.EXPLAIN:
-            return self._transition(
-                key,
-                session,
-                target=SessionStatus.EXPLANATION_REQUESTED,
-                duplicate_reason="explanation_already_requested",
-                success_reason="explanation_requested",
-            )
+            if session.status is SessionStatus.VIDEO_RECEIVED:
+                return self._replace(key, session, SessionStatus.EXPLANATION_REQUESTED, "explanation_requested")
+            if session.status is SessionStatus.EXPLANATION_REQUESTED:
+                return TransitionResult(state_changed=False, session=session, reason="explanation_already_requested")
+            if session.status is SessionStatus.EXPORT_PENDING:
+                return TransitionResult(state_changed=False, session=session, reason="export_confirmation_pending")
+            return TransitionResult(state_changed=False, session=session, reason="explanation_no_longer_available")
 
         if command is CanonicalCommand.EXPORT:
-            return self._transition(
-                key,
-                session,
-                target=SessionStatus.EXPORT_PENDING,
-                duplicate_reason="export_already_pending",
-                success_reason="export_pending",
-            )
+            if session.status in (SessionStatus.VIDEO_RECEIVED, SessionStatus.EXPLANATION_REQUESTED):
+                return self._replace(key, session, SessionStatus.EXPORT_PENDING, "export_pending")
+            if session.status is SessionStatus.EXPORT_PENDING:
+                return TransitionResult(state_changed=False, session=session, reason="export_already_pending")
+            return TransitionResult(state_changed=False, session=session, reason="export_no_longer_available")
 
         if command is CanonicalCommand.CONFIRM:
             if session.status is not SessionStatus.EXPORT_PENDING:
@@ -89,19 +87,6 @@ class ThreadSessionStore:
         if session.status is not SessionStatus.EXPORT_PENDING:
             return TransitionResult(state_changed=False, session=session, reason="nothing_to_cancel")
         return self._replace(key, session, SessionStatus.CANCELLATION_CONSUMED, "cancellation_consumed")
-
-    def _transition(
-        self,
-        key: SessionKey,
-        session: ThreadSession,
-        *,
-        target: SessionStatus,
-        duplicate_reason: str,
-        success_reason: str,
-    ) -> TransitionResult:
-        if session.status is target:
-            return TransitionResult(state_changed=False, session=session, reason=duplicate_reason)
-        return self._replace(key, session, target, success_reason)
 
     def _replace(
         self,

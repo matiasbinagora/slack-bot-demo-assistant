@@ -3,7 +3,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from slack_video_assistant.session_store import SessionKey, SessionStatus, ThreadSessionStore
+from slack_video_assistant.session_store import (
+    CanonicalCommand,
+    SessionKey,
+    SessionStatus,
+    ThreadSessionStore,
+)
 from slack_video_assistant.slack_events import ProcessedEventStore, SlackEventHandler, register_slack_handlers
 from slack_video_assistant.slack_file_adapter import SlackFileAdapter
 
@@ -19,6 +24,16 @@ class FakeSlackClient:
 
     def chat_postMessage(self, **payload: Any) -> None:
         self.calls.append(("chat_postMessage", payload))
+
+
+class ExplodingSlackClient(FakeSlackClient):
+    def __init__(self) -> None:
+        super().__init__({})
+
+    def files_info(self, *, file: str) -> dict[str, Any]:
+        raise RuntimeError(
+            "token=xoxb-secret-token url=https://files.slack.com/private path=/tmp/private/video.mp4"
+        )
 
 
 class FakeDownloader:
@@ -130,6 +145,145 @@ def test_file_shared_without_thread_requests_thread_upload_and_creates_no_sessio
     assert store.get(SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")) is None
 
 
+def test_file_shared_metadata_failure_posts_safe_thread_reply_and_redacts_logs(caplog) -> None:
+    handler, store = make_handler()
+    client = ExplodingSlackClient()
+
+    with caplog.at_level(logging.ERROR):
+        handler.handle_file_shared(
+            body={
+                "event_id": "Ev1",
+                "team_id": "T1",
+                "event": {
+                    "type": "file_shared",
+                    "file_id": "F1",
+                    "channel": "C1",
+                    "thread_ts": "170.0001",
+                },
+            },
+            ack=lambda: None,
+            client=client,
+        )
+
+    assert client.calls[-1] == (
+        "chat_postMessage",
+        {
+            "channel": "C1",
+            "thread_ts": "170.0001",
+            "text": "I couldn't read this Slack upload safely. Please share the MP4 in this thread again.",
+        },
+    )
+    assert "xoxb-secret-token" not in caplog.text
+    assert "https://files.slack.com/private" not in caplog.text
+    assert "/tmp/private/video.mp4" not in caplog.text
+    assert "[REDACTED_TOKEN]" in caplog.text
+    assert "[REDACTED_URL]" in caplog.text
+    assert "[REDACTED_PATH]" in caplog.text
+    assert store.get(SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")) is None
+
+
+def test_file_shared_with_mismatched_payload_channel_requests_thread_retry_without_state() -> None:
+    handler, store = make_handler()
+    client = FakeSlackClient(make_file_response(channel_id="C2", thread_ts="170.0002"))
+
+    handler.handle_file_shared(
+        body={
+            "event_id": "Ev1",
+            "team_id": "T1",
+            "event": {"type": "file_shared", "file_id": "F1", "channel": "C1"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert client.calls[-1] == (
+        "chat_postMessage",
+        {
+            "channel": "C1",
+            "text": "Please share the MP4 from inside a Slack thread so I can keep the workflow in one place.",
+        },
+    )
+    assert store.get(SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0002")) is None
+
+
+def test_file_shared_with_ambiguous_shares_does_not_guess_thread() -> None:
+    handler, store = make_handler()
+    client = FakeSlackClient(
+        {
+            "file": {
+                "id": "F1",
+                "name": "clip.mp4",
+                "mimetype": "video/mp4",
+                "filetype": "mp4",
+                "url_private_download": "https://files.slack.com/files-pri/T1-F1/download",
+                "shares": {
+                    "public": {
+                        "C1": [{"ts": "170.0000", "thread_ts": "170.0001"}],
+                        "C2": [{"ts": "180.0000", "thread_ts": "180.0001"}],
+                    }
+                },
+            }
+        }
+    )
+
+    handler.handle_file_shared(
+        body={
+            "event_id": "Ev1",
+            "team_id": "T1",
+            "event": {"type": "file_shared", "file_id": "F1"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert [call for call in client.calls if call[0] == "chat_postMessage"] == []
+    assert store.get(SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")) is None
+    assert store.get(SessionKey(team_id="T1", channel_id="C2", thread_ts="180.0001")) is None
+
+
+def test_file_shared_with_multiple_threads_in_same_channel_requests_thread_retry() -> None:
+    handler, store = make_handler()
+    client = FakeSlackClient(
+        {
+            "file": {
+                "id": "F1",
+                "name": "clip.mp4",
+                "mimetype": "video/mp4",
+                "filetype": "mp4",
+                "url_private_download": "https://files.slack.com/files-pri/T1-F1/download",
+                "shares": {
+                    "public": {
+                        "C1": [
+                            {"ts": "170.0000", "thread_ts": "170.0001"},
+                            {"ts": "171.0000", "thread_ts": "171.0001"},
+                        ]
+                    }
+                },
+            }
+        }
+    )
+
+    handler.handle_file_shared(
+        body={
+            "event_id": "Ev1",
+            "team_id": "T1",
+            "event": {"type": "file_shared", "file_id": "F1"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert client.calls[-1] == (
+        "chat_postMessage",
+        {
+            "channel": "C1",
+            "text": "Please share the MP4 from inside a Slack thread so I can keep the workflow in one place.",
+        },
+    )
+    assert store.get(SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")) is None
+    assert store.get(SessionKey(team_id="T1", channel_id="C1", thread_ts="171.0001")) is None
+
+
 def test_message_commands_transition_state_and_handle_duplicates_safely() -> None:
     handler, store = make_handler()
     client = FakeSlackClient(make_file_response())
@@ -184,6 +338,36 @@ def test_message_commands_transition_state_and_handle_duplicates_safely() -> Non
     assert session.status is SessionStatus.CONFIRMATION_CONSUMED
 
 
+def test_message_requires_real_thread_context_and_ignores_root_messages() -> None:
+    handler, store = make_handler()
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev2",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "ts": "170.0002", "text": "export"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+    handler.handle_message(
+        body={
+            "event_id": "Ev3",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "export"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert [call for call in client.calls if call[0] == "chat_postMessage"] == []
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.VIDEO_RECEIVED
+
+
 def test_retried_event_and_bot_message_do_not_duplicate_effects() -> None:
     handler, store = make_handler()
     client = FakeSlackClient(make_file_response())
@@ -226,6 +410,42 @@ def test_retried_event_and_bot_message_do_not_duplicate_effects() -> None:
     session = store.get(key)
     assert session is not None
     assert session.status is SessionStatus.EXPLANATION_REQUESTED
+
+
+def test_message_invalid_transitions_reply_without_mutating_terminal_state() -> None:
+    handler, store = make_handler()
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+    store.apply_command(key, CanonicalCommand.CONFIRM)
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev2",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "explain"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+    handler.handle_message(
+        body={
+            "event_id": "Ev3",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "export"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert [payload[1]["text"] for payload in client.calls if payload[0] == "chat_postMessage"] == [
+        "This thread has already finished its export decision. Please share a new MP4 in a new thread to start over.",
+        "This thread has already finished its export decision. Please share a new MP4 in a new thread to start over.",
+    ]
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.CONFIRMATION_CONSUMED
 
 
 def test_register_slack_handlers_wires_file_and_message_events() -> None:
