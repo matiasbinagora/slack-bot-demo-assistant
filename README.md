@@ -93,6 +93,36 @@ Required media tooling for the planned local pipeline:
 - FFprobe
 - Whisper only if local audio transcription is enabled
 
+## Slack Socket Mode foundation
+
+This repository now includes the local Python entrypoint and environment-backed configuration seam for the Slack Bolt Socket Mode foundation.
+
+### Entrypoint
+
+- Preferred local command: `.venv/bin/python -m slack_video_assistant`
+- Installed console script after package install: `slack-video-assistant`
+- The process reads only `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` from the process environment.
+- If either token is missing, startup fails safely with a redacted configuration error and does not claim readiness.
+
+### Local Slack App setup (secret-free)
+
+1. Create a Slack app for local development only.
+2. Enable **Socket Mode**. Do not configure a public HTTP Events API webhook for this MVP slice.
+3. Add the current known bot token scopes needed by the contract:
+   - `files:read`
+   - `chat:write`
+4. Subscribe to the known event for this slice and document future subscriptions:
+   - current planned event: `file_shared`
+   - future planned thread-message subscription: message events needed for thread commands such as `explain`, `export`, `confirm`, and `cancel`
+5. Treat workspace-, channel-, and Slack-plan-dependent permissions as pending confirmation before any live workspace QA or scope mutation.
+6. Install the app to the target workspace only after the required permissions are confirmed by a human.
+
+### Validation notes
+
+- Current QA is local only and uses mocked Slack Bolt and Socket Mode behavior.
+- No live Slack workspace QA was run for this repository slice.
+- This task does not add video processing, FFmpeg, Claude integration, file downloads, or thread-state handlers.
+
 ## Quality Gates
 
 Every implementation task must have:

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slack-video-assistant"
+version = "0.1.0"
+description = "Local-first Slack Video Assistant foundation"
+requires-python = ">=3.14"
+dependencies = [
+  "slack-bolt>=1.30.0,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9,<10",
+]
+
+[project.scripts]
+slack-video-assistant = "slack_video_assistant.main:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,4 @@
+slack-bolt<2,>=1.30.0
+
+[dev]
+pytest<10,>=9
