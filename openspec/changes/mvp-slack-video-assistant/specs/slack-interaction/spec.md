@@ -44,8 +44,13 @@ The application SHALL acknowledge supported Slack events promptly, SHALL use the
 
 #### Scenario: Explicit explanation request
 
-- **WHEN** a user sends `explain` or an accepted equivalent in the video thread
+- **WHEN** a user sends the canonical `explain` command in the video thread
 - **THEN** the bot acknowledges the request and schedules the explanation outside the event callback
+
+#### Scenario: Upload without a resolvable thread
+
+- **WHEN** a `file_shared` event can resolve the workspace and channel but cannot resolve a thread for the upload
+- **THEN** the bot replies in English asking the user to share the MP4 inside a thread, and it does not create session state or start a download
 
 ### Requirement: Export confirmation commands
 
@@ -60,6 +65,20 @@ The application SHALL recognize the canonical English thread commands `export`, 
 
 - **WHEN** a user sends `confirm` without a pending export suggestion
 - **THEN** the bot replies with a safe English explanation and does not start FFmpeg
+
+### Requirement: Idempotent Slack event handling
+
+The application SHALL tolerate retried Slack events and duplicate canonical commands without duplicating user-visible side effects, and SHALL ignore bot-authored thread messages.
+
+#### Scenario: Retried upload or thread event
+
+- **WHEN** Slack retries the same `file_shared` or canonical thread command event
+- **THEN** the bot acknowledges the retry safely and does not duplicate replies or state transitions
+
+#### Scenario: Bot-authored message
+
+- **WHEN** a bot-authored message is delivered through the message event subscription
+- **THEN** the bot ignores it and does not create a loop or mutate session state
 
 ### Requirement: Secure Slack file and message access
 
