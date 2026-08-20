@@ -119,9 +119,10 @@ This repository now includes the local Python entrypoint and environment-backed 
 
 ### Validation notes
 
-- Current QA is local only and uses mocked Slack Bolt and Socket Mode behavior.
+- Current QA is local only and uses mocked Slack Bolt, Socket Mode, thread-command, and authenticated-download behavior.
 - No live Slack workspace QA was run for this repository slice.
-- This task does not add video processing, FFmpeg, Claude integration, file downloads, or thread-state handlers.
+- This slice adds Slack event handling, thread state, and a secure Slack file download adapter only.
+- This slice does not add Claude integration, FFmpeg or FFprobe processing, automatic download on file_shared, media understanding, or export generation.
 
 ## Quality Gates
 
