@@ -1,2 +1,0 @@
-[console_scripts]
-slack-video-assistant = slack_video_assistant.main:main
