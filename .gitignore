@@ -1,1 +1,11 @@
 .env.mcp
+.agents/
+.claude/
+skills-lock.json
+.opencode/node_modules/
+.codebase-memory/
+graphify-out/
+__pycache__/
+.pytest_cache/
+.venv/
+tmp/
