@@ -79,6 +79,7 @@ class AudioEvidence:
     transcript_path: Path | None = None
     transcript_text: str | None = None
     timestamps_available: bool = False
+    transcription_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -393,6 +394,7 @@ def build_audio_evidence(
             status=EvidenceStatus.DEGRADED,
             detail="Audio was extracted, but transcription failed safely and no transcript was retained.",
             audio_path=audio_path,
+            transcription_failed=True,
         )
 
     transcript_path = workspace.controlled_path("transcript/transcript.txt")

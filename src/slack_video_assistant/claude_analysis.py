@@ -76,6 +76,8 @@ class FrameEvidence:
     label: str
     observation: str
     timestamp_seconds: float | None = None
+    image_media_type: str | None = None
+    image_base64: str | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,8 @@ def build_prompt_envelope(request: AnalysisRequest) -> PromptEnvelope:
                 "label": redact_sensitive(frame.label),
                 "observation": redact_sensitive(frame.observation),
                 "timestamp_seconds": frame.timestamp_seconds,
+                "image_media_type": frame.image_media_type,
+                "image_base64": frame.image_base64,
             }
             for frame in request.frames
         ],

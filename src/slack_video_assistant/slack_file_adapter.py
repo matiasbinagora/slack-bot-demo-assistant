@@ -118,6 +118,16 @@ class SlackFileAdapter:
                 f"Slack file download failed: {redact_sensitive(exc)}"
             ) from exc
 
+    def iter_download_bytes(self, file_record: SlackFileRecord) -> Any:
+        try:
+            response = self._downloader.stream(
+                url=file_record.url_private_download,
+                headers={"Authorization": f"Bearer {self._bot_token}"},
+            )
+            return response.iter_bytes(chunk_size=65536)
+        except Exception as exc:
+            raise SlackAdapterError(f"Slack file download failed: {redact_sensitive(exc)}") from exc
+
     def _validate_download_url(self, url: str) -> None:
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()

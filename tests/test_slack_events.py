@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from slack_video_assistant.explanation_orchestrator import ExplanationOrchestrator
 from slack_video_assistant.session_store import (
     CanonicalCommand,
     SessionKey,
@@ -41,6 +42,15 @@ class FakeDownloader:
         raise AssertionError(f"download should not run in this task slice: {url} {headers}")
 
 
+
+
+class RecordingExplanationOrchestrator:
+    def __init__(self) -> None:
+        self.sessions = []
+
+    def enqueue(self, *, client: Any, session) -> None:
+        self.sessions.append((client, session))
+
 class FakeApp:
     def __init__(self) -> None:
         self.handlers: dict[str, Any] = {}
@@ -53,7 +63,9 @@ class FakeApp:
         return _register
 
 
-def make_handler() -> tuple[SlackEventHandler, ThreadSessionStore]:
+def make_handler(
+    explanation_orchestrator: ExplanationOrchestrator | RecordingExplanationOrchestrator | None = None,
+) -> tuple[SlackEventHandler, ThreadSessionStore]:
     store = ThreadSessionStore()
 
     def _factory(client: Any) -> SlackFileAdapter:
@@ -70,6 +82,7 @@ def make_handler() -> tuple[SlackEventHandler, ThreadSessionStore]:
             session_store=store,
             processed_events=ProcessedEventStore(),
             logger=logging.getLogger("tests.slack_events"),
+            explanation_orchestrator=explanation_orchestrator,
         ),
         store,
     )
@@ -369,7 +382,8 @@ def test_message_requires_real_thread_context_and_ignores_root_messages() -> Non
 
 
 def test_retried_event_and_bot_message_do_not_duplicate_effects() -> None:
-    handler, store = make_handler()
+    orchestrator = RecordingExplanationOrchestrator()
+    handler, store = make_handler(orchestrator)
     client = FakeSlackClient(make_file_response())
     key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
     store.receive_video(key, file_id="F1")
@@ -403,10 +417,11 @@ def test_retried_event_and_bot_message_do_not_duplicate_effects() -> None:
             {
                 "channel": "C1",
                 "thread_ts": "170.0001",
-                "text": "Explanation request noted. This task slice only records the thread state; no Claude analysis runs yet.",
+                "text": "I’m preparing an explanation for this video now. I’ll reply in this thread when it’s ready.",
             },
         )
     ]
+    assert len(orchestrator.sessions) == 1
     session = store.get(key)
     assert session is not None
     assert session.status is SessionStatus.EXPLANATION_REQUESTED

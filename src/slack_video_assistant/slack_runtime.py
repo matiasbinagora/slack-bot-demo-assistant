@@ -8,6 +8,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from slack_video_assistant.config import SlackSettings
+from slack_video_assistant.explanation_orchestrator import ExplanationOrchestrator
 from slack_video_assistant.session_store import ThreadSessionStore
 from slack_video_assistant.slack_events import ProcessedEventStore, SlackEventHandler, register_slack_handlers
 from slack_video_assistant.slack_file_adapter import SlackFileAdapter
@@ -65,6 +66,13 @@ def build_slack_runtime(
             session_store=ThreadSessionStore(),
             processed_events=ProcessedEventStore(),
             logger=logger,
+            explanation_orchestrator=ExplanationOrchestrator(
+                file_adapter_factory=_file_adapter_factory,
+                logger=logger,
+                temp_root=settings.video_temp_dir,
+                max_video_bytes=settings.max_video_bytes,
+                max_video_duration_seconds=settings.max_video_duration_seconds,
+            ),
         ),
     )
 
