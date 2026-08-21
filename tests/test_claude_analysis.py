@@ -89,9 +89,15 @@ def test_analyze_returns_structured_result_from_fake_runner() -> None:
 
 
 def test_analyze_raises_timeout_error() -> None:
+    finalized = False
+
     async def slow_query_runner(*, prompt: str, options: Any):
-        await asyncio.sleep(0.05)
-        yield FakeResultMessage(structured_output={})
+        nonlocal finalized
+        try:
+            await asyncio.sleep(0.05)
+            yield FakeResultMessage(structured_output={})
+        finally:
+            finalized = True
 
     analyzer = ClaudeAnalyzer(
         settings=ClaudeSettings(api_key="sk-ant-test-key"),
@@ -99,8 +105,11 @@ def test_analyze_raises_timeout_error() -> None:
         query_runner=slow_query_runner,
     )
 
-    with pytest.raises(AnalysisTimeoutError):
+    with pytest.raises(AnalysisTimeoutError) as excinfo:
         analyzer.analyze(make_request())
+
+    assert isinstance(excinfo.value.__cause__, asyncio.TimeoutError)
+    assert finalized is True
 
 
 def test_analyze_raises_provider_error_for_unsuccessful_result() -> None:

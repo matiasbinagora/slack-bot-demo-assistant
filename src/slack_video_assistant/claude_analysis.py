@@ -170,13 +170,12 @@ class ClaudeAnalyzer:
 
     async def _analyze_async(self, request: AnalysisRequest) -> AnalysisResult:
         envelope = build_prompt_envelope(request)
-        result_message: Any | None = None
         try:
-            async with asyncio.timeout(self._timeout_seconds):
-                async for message in self._run_query(envelope):
-                    if _is_result_message(message):
-                        result_message = message
-        except TimeoutError as exc:
+            result_message = await asyncio.wait_for(
+                self._collect_result_message(envelope),
+                timeout=self._timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
             self._logger.error("Claude analysis timed out after %.2fs", self._timeout_seconds)
             raise AnalysisTimeoutError("Claude analysis timed out.") from exc
         except AnalysisError:
@@ -200,6 +199,13 @@ class ClaudeAnalyzer:
         structured_output = getattr(result_message, "structured_output", None)
         payload = structured_output if structured_output is not None else getattr(result_message, "result", None)
         return _parse_analysis_result(payload)
+
+    async def _collect_result_message(self, envelope: PromptEnvelope) -> Any | None:
+        result_message: Any | None = None
+        async for message in self._run_query(envelope):
+            if _is_result_message(message):
+                result_message = message
+        return result_message
 
     async def _run_query(self, envelope: PromptEnvelope) -> AsyncIterator[Any]:
         query_runner = self._query_runner
