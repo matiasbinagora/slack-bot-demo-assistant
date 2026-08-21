@@ -16,6 +16,7 @@ class SlackSettings:
     app_token: str
     log_level: str = "INFO"
     max_video_bytes: int = 104857600
+    max_video_duration_seconds: int = 300
     video_temp_dir: Path | None = None
 
     @classmethod
@@ -42,12 +43,21 @@ class SlackSettings:
         if max_video_bytes <= 0:
             raise ConfigError("MAX_VIDEO_BYTES must be greater than zero.")
 
+        max_video_duration_raw = source.get("MAX_VIDEO_DURATION_SECONDS", "300").strip() or "300"
+        try:
+            max_video_duration_seconds = int(max_video_duration_raw)
+        except ValueError as exc:
+            raise ConfigError("MAX_VIDEO_DURATION_SECONDS must be an integer.") from exc
+        if max_video_duration_seconds <= 0:
+            raise ConfigError("MAX_VIDEO_DURATION_SECONDS must be greater than zero.")
+
         video_temp_dir_raw = source.get("VIDEO_TEMP_DIR", "").strip()
         return cls(
             bot_token=source["SLACK_BOT_TOKEN"].strip(),
             app_token=source["SLACK_APP_TOKEN"].strip(),
             log_level=log_level,
             max_video_bytes=max_video_bytes,
+            max_video_duration_seconds=max_video_duration_seconds,
             video_temp_dir=Path(video_temp_dir_raw) if video_temp_dir_raw else None,
         )
 

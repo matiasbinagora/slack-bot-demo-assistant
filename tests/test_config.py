@@ -8,6 +8,7 @@ def test_loads_valid_slack_settings() -> None:
             "SLACK_APP_TOKEN": "xapp-test-token",
             "LOG_LEVEL": "debug",
             "MAX_VIDEO_BYTES": "2048",
+            "MAX_VIDEO_DURATION_SECONDS": "120",
             "VIDEO_TEMP_DIR": "/tmp/slack-video-assistant-tests",
         }
     )
@@ -16,6 +17,7 @@ def test_loads_valid_slack_settings() -> None:
     assert settings.app_token == "xapp-test-token"
     assert settings.log_level == "DEBUG"
     assert settings.max_video_bytes == 2048
+    assert settings.max_video_duration_seconds == 120
     assert str(settings.video_temp_dir) == "/tmp/slack-video-assistant-tests"
 
 
@@ -60,6 +62,23 @@ def test_invalid_max_video_bytes_is_reported_safely() -> None:
         raise AssertionError("Expected ConfigError")
 
     assert message == "MAX_VIDEO_BYTES must be an integer."
+
+
+def test_invalid_max_video_duration_seconds_is_reported_safely() -> None:
+    try:
+        SlackSettings.from_env(
+            {
+                "SLACK_BOT_TOKEN": "xoxb-test-token",
+                "SLACK_APP_TOKEN": "xapp-test-token",
+                "MAX_VIDEO_DURATION_SECONDS": "abc",
+            }
+        )
+    except ConfigError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected ConfigError")
+
+    assert message == "MAX_VIDEO_DURATION_SECONDS must be an integer."
 
 
 def test_loads_valid_claude_settings() -> None:
