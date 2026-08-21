@@ -88,6 +88,14 @@ class ThreadSessionStore:
             return TransitionResult(state_changed=False, session=session, reason="nothing_to_cancel")
         return self._replace(key, session, SessionStatus.CANCELLATION_CONSUMED, "cancellation_consumed")
 
+    def rollback_explain_request(self, key: SessionKey) -> TransitionResult:
+        session = self._sessions.get(key)
+        if session is None:
+            return TransitionResult(state_changed=False, session=None, reason="missing_session")
+        if session.status is not SessionStatus.EXPLANATION_REQUESTED:
+            return TransitionResult(state_changed=False, session=session, reason="rollback_not_needed")
+        return self._replace(key, session, SessionStatus.VIDEO_RECEIVED, "explanation_rollback")
+
     def _replace(
         self,
         key: SessionKey,

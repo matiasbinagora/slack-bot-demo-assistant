@@ -162,6 +162,7 @@ class SlackEventHandler:
                 self._explanation_orchestrator.enqueue(client=client, session=result.session)
             except Exception:
                 self._logger.exception("Explanation orchestration failed to start")
+                self._session_store.rollback_explain_request(key)
                 self._post_message(
                     client,
                     channel=context.channel_id,
