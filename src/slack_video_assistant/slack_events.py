@@ -9,6 +9,7 @@ from slack_video_assistant.logging_utils import redact_sensitive
 from slack_video_assistant.session_store import (
     CanonicalCommand,
     SessionKey,
+    SessionStatus,
     ThreadSessionStore,
     TransitionResult,
 )
@@ -138,25 +139,43 @@ class SlackEventHandler:
             channel_id=context.channel_id,
             thread_ts=context.thread_ts,
         )
+        existing_session = self._session_store.get(key)
+        if (
+            command is CanonicalCommand.EXPLAIN
+            and self._explanation_orchestrator is None
+            and existing_session is not None
+            and existing_session.status in (SessionStatus.VIDEO_RECEIVED, SessionStatus.EXPLANATION_REQUESTED)
+        ):
+            self._post_message(
+                client,
+                channel=context.channel_id,
+                thread_ts=context.thread_ts,
+                text="I couldn't start the explanation job safely. Please try again in this thread.",
+            )
+            return
+
         result = self._session_store.apply_command(key, command)
         if command is CanonicalCommand.EXPLAIN and result.reason == "explanation_requested" and result.session:
+            try:
+                if self._explanation_orchestrator is None:
+                    raise RuntimeError("missing explanation orchestrator")
+                self._explanation_orchestrator.enqueue(client=client, session=result.session)
+            except Exception:
+                self._logger.exception("Explanation orchestration failed to start")
+                self._post_message(
+                    client,
+                    channel=context.channel_id,
+                    thread_ts=context.thread_ts,
+                    text="I couldn't start the explanation job safely. Please try again in this thread.",
+                )
+                return
+
             self._post_message(
                 client,
                 channel=context.channel_id,
                 thread_ts=context.thread_ts,
                 text="I’m preparing an explanation for this video now. I’ll reply in this thread when it’s ready.",
             )
-            if self._explanation_orchestrator is not None:
-                try:
-                    self._explanation_orchestrator.enqueue(client=client, session=result.session)
-                except Exception:
-                    self._logger.exception("Explanation orchestration failed to start")
-                    self._post_message(
-                        client,
-                        channel=context.channel_id,
-                        thread_ts=context.thread_ts,
-                        text="I couldn't start the explanation job safely. Please try again in this thread.",
-                    )
             return
 
         self._post_message(

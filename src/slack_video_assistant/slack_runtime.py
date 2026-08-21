@@ -9,6 +9,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from slack_video_assistant.config import SlackSettings
 from slack_video_assistant.explanation_orchestrator import ExplanationOrchestrator
+from slack_video_assistant.media_pipeline import _prepare_temp_root
 from slack_video_assistant.session_store import ThreadSessionStore
 from slack_video_assistant.slack_events import ProcessedEventStore, SlackEventHandler, register_slack_handlers
 from slack_video_assistant.slack_file_adapter import SlackFileAdapter
@@ -48,6 +49,7 @@ def build_slack_runtime(
     app_factory: Callable[..., Any] = App,
     handler_factory: Callable[..., Any] = SocketModeHandler,
 ) -> SlackRuntime:
+    prepared_temp_root = _prepare_temp_root(settings.video_temp_dir)
     app = app_factory(token=settings.bot_token, logger=logger)
 
     def _file_adapter_factory(client: Any) -> SlackFileAdapter:
@@ -56,7 +58,7 @@ def build_slack_runtime(
             client=client,
             downloader=_RequestsLikeSlackDownloader(),
             max_bytes=settings.max_video_bytes,
-            temp_root=settings.video_temp_dir,
+            temp_root=prepared_temp_root,
         )
 
     register_slack_handlers(
@@ -69,7 +71,7 @@ def build_slack_runtime(
             explanation_orchestrator=ExplanationOrchestrator(
                 file_adapter_factory=_file_adapter_factory,
                 logger=logger,
-                temp_root=settings.video_temp_dir,
+                temp_root=prepared_temp_root,
                 max_video_bytes=settings.max_video_bytes,
                 max_video_duration_seconds=settings.max_video_duration_seconds,
             ),

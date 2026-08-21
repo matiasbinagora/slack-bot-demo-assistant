@@ -381,6 +381,39 @@ def test_message_requires_real_thread_context_and_ignores_root_messages() -> Non
     assert session.status is SessionStatus.VIDEO_RECEIVED
 
 
+
+
+def test_missing_explanation_orchestrator_posts_safe_failure_without_mutating_session() -> None:
+    handler, store = make_handler()
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id='T1', channel_id='C1', thread_ts='170.0001')
+    store.receive_video(key, file_id='F1')
+
+    handler.handle_message(
+        body={
+            'event_id': 'Ev-missing-orchestrator',
+            'team_id': 'T1',
+            'event': {'type': 'message', 'channel': 'C1', 'thread_ts': '170.0001', 'text': 'explain'},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert [call for call in client.calls if call[0] == 'chat_postMessage'] == [
+        (
+            'chat_postMessage',
+            {
+                'channel': 'C1',
+                'thread_ts': '170.0001',
+                'text': "I couldn't start the explanation job safely. Please try again in this thread.",
+            },
+        )
+    ]
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.VIDEO_RECEIVED
+
+
 def test_retried_event_and_bot_message_do_not_duplicate_effects() -> None:
     orchestrator = RecordingExplanationOrchestrator()
     handler, store = make_handler(orchestrator)

@@ -105,9 +105,18 @@ class MediaWorkspace:
 
     @classmethod
     def create(cls, *, temp_root: Path | None = None, request_id: str | None = None) -> "MediaWorkspace":
-        base_root = temp_root.resolve() if temp_root is not None else None
+        base_root = _prepare_temp_root(temp_root)
         prefix = f"slack-video-assistant-{_normalize_request_id(request_id)}-"
-        root = Path(tempfile.mkdtemp(prefix=prefix, dir=base_root))
+        try:
+            root = Path(tempfile.mkdtemp(prefix=prefix, dir=base_root))
+        except FileNotFoundError as exc:
+            raise MediaValidationError(
+                "The configured video temp directory is unavailable for analysis."
+            ) from exc
+        except PermissionError as exc:
+            raise MediaValidationError(
+                "The configured video temp directory is unavailable for analysis."
+            ) from exc
         os.chmod(root, 0o700)
         return cls(root)
 
@@ -502,6 +511,29 @@ def _optional_string(value: object) -> str | None:
 def _validate_duration_limit(max_duration_seconds: float) -> None:
     if not math.isfinite(max_duration_seconds) or max_duration_seconds <= 0:
         raise MediaValidationError("The configured video duration limit is invalid.")
+
+
+def _prepare_temp_root(temp_root: Path | None) -> Path | None:
+    if temp_root is None:
+        return None
+
+    try:
+        temp_root.mkdir(parents=True, exist_ok=True)
+    except FileExistsError as exc:
+        raise MediaValidationError(
+            "The configured video temp directory is unavailable for analysis."
+        ) from exc
+    except OSError as exc:
+        raise MediaValidationError(
+            "The configured video temp directory is unavailable for analysis."
+        ) from exc
+
+    try:
+        return temp_root.resolve()
+    except OSError as exc:
+        raise MediaValidationError(
+            "The configured video temp directory is unavailable for analysis."
+        ) from exc
 
 
 def _select_frame_timestamps(*, duration_seconds: float, frame_count: int) -> tuple[float, ...]:

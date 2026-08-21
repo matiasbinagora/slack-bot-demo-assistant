@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from slack_video_assistant.config import SlackSettings
 from slack_video_assistant.slack_runtime import build_slack_runtime
@@ -57,6 +58,30 @@ def test_build_slack_runtime_passes_environment_settings_and_logger_to_factories
         "handler_token": "xapp-test-token",
         "handler_logger": logger,
     }
+
+
+
+
+def test_build_slack_runtime_creates_missing_video_temp_dir(tmp_path: Path) -> None:
+    temp_root = tmp_path / 'runtime-temp-root'
+    settings = SlackSettings(
+        bot_token='xoxb-test-token',
+        app_token='xapp-test-token',
+        log_level='INFO',
+        video_temp_dir=temp_root,
+    )
+    logger = logging.getLogger('tests.slack_runtime.temp_root')
+
+    runtime = build_slack_runtime(
+        settings,
+        logger=logger,
+        app_factory=lambda *, token, logger: FakeApp(),
+        handler_factory=lambda received_app, app_token, *, logger: object(),
+    )
+
+    assert temp_root.exists() is True
+    assert temp_root.is_dir() is True
+    assert runtime.app is not None
 
 
 def test_build_slack_runtime_registers_file_shared_and_message_handlers() -> None:

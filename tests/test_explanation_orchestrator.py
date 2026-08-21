@@ -189,6 +189,38 @@ def test_explain_acknowledges_and_schedules_background_job_without_running_inlin
     assert 'Summary:' in client.calls[-1]['text']
 
 
+
+
+def test_explanation_creates_missing_configured_temp_root_and_posts_success(tmp_path: Path) -> None:
+    fixture = build_mp4_fixture(tmp_path, name='missing-root', with_audio=True, duration_seconds=1)
+    temp_root = tmp_path / 'missing' / 'nested-work'
+    adapter = FakeAdapter(fixture.read_bytes())
+    client = FakeSlackClient()
+    analyzer = CapturingAnalyzer(
+        result=AnalysisResult(
+            summary='A presenter opens a dashboard.',
+            key_points=('The dashboard appears.',),
+            timestamps_available=False,
+            timestamps=(),
+        ),
+        calls=[],
+    )
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: adapter,
+        analyzer_factory=lambda: analyzer,
+        executor=ImmediateExecutor(),
+        logger=logging.getLogger('tests.explanation.temp_root'),
+        temp_root=temp_root,
+        transcriber=FakeTranscriber(timestamps_available=False),
+    )
+
+    orchestrator.enqueue(client=client, session=make_session())
+
+    assert temp_root.exists() is True
+    assert client.calls[0]['thread_ts'] == '170.0001'
+    assert 'Summary:' in client.calls[0]['text']
+
+
 def test_explanation_success_posts_summary_key_points_and_timestamps_with_controlled_evidence(tmp_path: Path) -> None:
     fixture = build_mp4_fixture(tmp_path, name='success', with_audio=True, duration_seconds=2)
     adapter = FakeAdapter(fixture.read_bytes())
@@ -282,13 +314,16 @@ def test_explanation_transcription_failure_posts_safe_thread_error(tmp_path: Pat
 
 def test_build_analysis_request_uses_controlled_frame_and_transcript_evidence(tmp_path: Path) -> None:
     fixture = build_mp4_fixture(tmp_path, name='request', with_audio=True, duration_seconds=1)
+    temp_root = tmp_path / 'workspaces'
     prepared = prepare_media_evidence(
         byte_stream=[fixture.read_bytes()],
         request_id='request-test',
         untrusted_filename='clip.mp4',
-        temp_root=tmp_path / 'workspaces',
+        temp_root=temp_root,
         transcriber=FakeTranscriber(text='Narration.', timestamps_available=True),
     )
+
+    assert temp_root.exists() is True
 
     request = build_analysis_request(prepared)
 
