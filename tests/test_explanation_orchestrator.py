@@ -41,6 +41,11 @@ class FakeSlackClient:
         self.calls.append(payload)
 
 
+class ExplodingSlackClient(FakeSlackClient):
+    def chat_postMessage(self, **payload: Any) -> None:
+        raise RuntimeError("token=xoxb-secret-token url=https://files.slack.com/private path=/tmp/private/video.mp4")
+
+
 class FakeDownloadResponse:
     def __init__(self, payload: bytes) -> None:
         self.payload = payload
@@ -145,6 +150,31 @@ def build_mp4_fixture(
     command.append(str(output_path))
     subprocess.run(command, check=True, capture_output=True, text=True)
     return output_path
+
+
+
+
+def test_explanation_post_message_logs_redacted_exception(caplog) -> None:
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: None,
+        executor=ImmediateExecutor(),
+        logger=logging.getLogger('tests.explanation.logging'),
+    )
+
+    with caplog.at_level(logging.ERROR, logger='tests.explanation.logging'):
+        orchestrator._post_message(
+            ExplodingSlackClient(),
+            channel='C1',
+            thread_ts='170.0001',
+            text='hello',
+        )
+
+    assert 'xoxb-secret-token' not in caplog.text
+    assert 'https://files.slack.com/private' not in caplog.text
+    assert '/tmp/private/video.mp4' not in caplog.text
+    assert '[REDACTED_TOKEN]' in caplog.text
+    assert '[REDACTED_URL]' in caplog.text
+    assert '[REDACTED_PATH]' in caplog.text
 
 
 def test_explain_acknowledges_and_schedules_background_job_without_running_inline(tmp_path: Path) -> None:

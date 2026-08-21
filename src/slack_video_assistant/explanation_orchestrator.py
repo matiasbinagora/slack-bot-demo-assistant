@@ -19,6 +19,7 @@ from slack_video_assistant.claude_analysis import (
     TranscriptEvidence,
     build_claude_analyzer,
 )
+from slack_video_assistant.logging_utils import redact_sensitive
 from slack_video_assistant.media_pipeline import (
     AudioEvidence,
     MediaExtractionError,
@@ -130,7 +131,7 @@ class ExplanationOrchestrator:
         try:
             client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
         except Exception as exc:
-            self._logger.error("Slack message publish failed during explanation: %s", exc)
+            self._logger.error("Slack message publish failed during explanation: %s", redact_sensitive(exc))
 
 
 def build_analysis_request(prepared: PreparedMediaEvidence) -> AnalysisRequest:

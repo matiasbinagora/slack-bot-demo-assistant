@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 
 from slack_video_assistant.config import SlackSettings
-from slack_video_assistant.slack_runtime import build_slack_runtime
+from slack_video_assistant.slack_runtime import _RequestsLikeSlackDownloader, build_slack_runtime
 
 
 class FakeApp:
@@ -121,3 +121,32 @@ def test_build_slack_runtime_registers_file_shared_and_message_handlers() -> Non
 
     assert sorted(registered) == ["file_shared", "message"]
     assert runtime.app is not None
+
+
+class FakeRawResponse:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self.closed = 0
+
+    def read(self, chunk_size: int) -> bytes:
+        del chunk_size
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_requests_like_slack_downloader_closes_wrapped_response_on_exhaustion(monkeypatch) -> None:
+    raw_response = FakeRawResponse([b"abc", b"def", b""])
+
+    monkeypatch.setattr('urllib.request.urlopen', lambda request: raw_response)
+
+    response = _RequestsLikeSlackDownloader().stream(
+        url='https://files.slack.com/files-pri/T1-F1/download',
+        headers={'Authorization': 'Bearer xoxb-secret-token'},
+    )
+
+    assert b''.join(response.iter_bytes()) == b'abcdef'
+    assert raw_response.closed == 1

@@ -20,6 +20,7 @@ class SlackWebClient(Protocol):
 
 class DownloadResponse(Protocol):
     def iter_bytes(self, chunk_size: int = 65536) -> Any: ...
+    def close(self) -> None: ...
 
 
 class SlackFileDownloader(Protocol):
@@ -124,9 +125,19 @@ class SlackFileAdapter:
                 url=file_record.url_private_download,
                 headers={"Authorization": f"Bearer {self._bot_token}"},
             )
-            return response.iter_bytes(chunk_size=65536)
         except Exception as exc:
             raise SlackAdapterError(f"Slack file download failed: {redact_sensitive(exc)}") from exc
+
+        def _iterator():
+            try:
+                for chunk in response.iter_bytes(chunk_size=65536):
+                    yield chunk
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+
+        return _iterator()
 
     def _validate_download_url(self, url: str) -> None:
         parsed = urlparse(url)

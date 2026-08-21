@@ -31,13 +31,25 @@ class _RequestsLikeSlackDownloader:
         class _ResponseWrapper:
             def __init__(self, raw_response: Any) -> None:
                 self._raw_response = raw_response
+                self._closed = False
 
             def iter_bytes(self, chunk_size: int = 65536):
-                while True:
-                    chunk = self._raw_response.read(chunk_size)
-                    if not chunk:
-                        break
-                    yield chunk
+                try:
+                    while True:
+                        chunk = self._raw_response.read(chunk_size)
+                        if not chunk:
+                            break
+                        yield chunk
+                finally:
+                    self.close()
+
+            def close(self) -> None:
+                if self._closed:
+                    return
+                self._closed = True
+                close = getattr(self._raw_response, "close", None)
+                if callable(close):
+                    close()
 
         return _ResponseWrapper(response)
 
