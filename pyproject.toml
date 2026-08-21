@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Local-first Slack Video Assistant foundation"
 requires-python = ">=3.10"
 dependencies = [
+  "claude-agent-sdk>=0.2.143,<0.3",
   "slack-bolt>=1.30.0,<2",
 ]
 

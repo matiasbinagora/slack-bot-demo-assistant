@@ -50,3 +50,19 @@ class SlackSettings:
             max_video_bytes=max_video_bytes,
             video_temp_dir=Path(video_temp_dir_raw) if video_temp_dir_raw else None,
         )
+
+
+@dataclass(frozen=True)
+class ClaudeSettings:
+    api_key: str
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "ClaudeSettings":
+        source = env if env is not None else environ
+        api_key = source.get("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            raise ConfigError(
+                "Missing required environment variable: ANTHROPIC_API_KEY. "
+                "Provide the Claude API key through the process environment only."
+            )
+        return cls(api_key=api_key)
