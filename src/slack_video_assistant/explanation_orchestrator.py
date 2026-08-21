@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from slack_video_assistant.claude_analysis import (
+    AnalysisBudgetError,
     AnalysisConfigurationError,
     AnalysisInvalidResponseError,
     AnalysisProviderError,
@@ -161,7 +162,7 @@ def _frame_evidence(path: Path, label: str, timestamp_seconds: float | None) -> 
         label=label,
         observation="Representative frame captured from the uploaded video.",
         timestamp_seconds=timestamp_seconds,
-        image_media_type="image/png",
+        image_media_type="image/jpeg",
         image_base64=base64.b64encode(path.read_bytes()).decode("ascii"),
     )
 
@@ -217,6 +218,8 @@ def failure_message_for_exception(exc: Exception) -> str:
         return "I couldn't prepare media evidence safely with FFmpeg, so the explanation could not continue."
     if isinstance(exc, AnalysisTimeoutError):
         return "Claude took too long to analyze this video, so no explanation was posted. Please try again."
+    if isinstance(exc, AnalysisBudgetError):
+        return "I couldn't fit this video evidence within the safe Claude request budget, so no explanation was posted. Please try a shorter or simpler clip in this thread."
     if isinstance(exc, AnalysisProviderError):
         return "Claude couldn't analyze this video successfully, so no explanation was posted. Please try again."
     if isinstance(exc, AnalysisInvalidResponseError):

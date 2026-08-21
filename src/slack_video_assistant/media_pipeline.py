@@ -19,6 +19,9 @@ from slack_video_assistant.logging_utils import redact_sensitive
 DEFAULT_MAX_VIDEO_BYTES = 104857600
 DEFAULT_MAX_VIDEO_DURATION_SECONDS = 300.0
 DEFAULT_FRAME_COUNT = 3
+MAX_FRAME_EDGE_PIXELS = 512
+FRAME_JPEG_QUALITY = 8
+FRAME_END_MARGIN_SECONDS = 0.25
 
 
 class MediaPipelineError(RuntimeError):
@@ -318,7 +321,7 @@ def extract_frames(
     frame_timestamps = _select_frame_timestamps(duration_seconds=duration_seconds, frame_count=frame_count)
     extracted: list[ExtractedFrame] = []
     for index, timestamp_seconds in enumerate(frame_timestamps, start=1):
-        output_path = workspace.controlled_path(f"frames/frame-{index:02d}.png")
+        output_path = workspace.controlled_path(f"frames/frame-{index:02d}.jpg")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _run_ffmpeg(
             [
@@ -330,8 +333,12 @@ def extract_frames(
                 f"{timestamp_seconds:.3f}",
                 "-i",
                 str(source_path),
+                "-vf",
+                f"scale={MAX_FRAME_EDGE_PIXELS}:{MAX_FRAME_EDGE_PIXELS}:force_original_aspect_ratio=decrease",
                 "-frames:v",
                 "1",
+                "-q:v",
+                str(FRAME_JPEG_QUALITY),
                 str(output_path),
             ],
             failure_message="FFmpeg could not extract a representative frame.",
@@ -542,7 +549,7 @@ def _select_frame_timestamps(*, duration_seconds: float, frame_count: int) -> tu
     if frame_count == 1:
         return (0.0,)
 
-    max_timestamp = max(duration_seconds - 0.05, 0.0)
+    max_timestamp = max(duration_seconds - FRAME_END_MARGIN_SECONDS, 0.0)
     if max_timestamp == 0.0:
         return (0.0,)
 

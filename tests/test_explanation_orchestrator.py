@@ -7,12 +7,16 @@ from pathlib import Path
 from typing import Any
 
 from slack_video_assistant.claude_analysis import (
+    MAX_TOTAL_IMAGE_BASE64_CHARS,
+    MAX_USER_PROMPT_CHARS,
+    AnalysisBudgetError,
     AnalysisConfigurationError,
     AnalysisInvalidResponseError,
     AnalysisProviderError,
     AnalysisResult,
     AnalysisTimeoutError,
     AnalysisTimestamp,
+    build_prompt_envelope,
 )
 from slack_video_assistant.explanation_orchestrator import (
     ExplanationOrchestrator,
@@ -100,6 +104,16 @@ class CapturingAnalyzer:
         return self.result
 
 
+class BudgetCheckingAnalyzer:
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    def analyze(self, request):
+        self.calls.append(request)
+        build_prompt_envelope(request)
+        raise AssertionError("budget checker should fail before provider execution")
+
+
 class FakeTranscriber:
     def __init__(self, *, text: str = 'Detected narration.', timestamps_available: bool = True) -> None:
         self.text = text
@@ -112,6 +126,15 @@ class FakeTranscriber:
 class ExplodingTranscriber:
     def transcribe(self, *, audio_path: Path) -> TranscriptionResult:
         raise RuntimeError('boom')
+
+
+class ProviderRejectingAnalyzer:
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    def analyze(self, request):
+        self.calls.append(request)
+        raise AnalysisProviderError('provider rejected request')
 
 
 def make_session() -> ThreadSession:
@@ -287,7 +310,7 @@ def test_explanation_success_posts_summary_key_points_and_timestamps_with_contro
     request = analyzer_calls[0]
     assert request.transcript is not None
     assert request.frames[0].image_base64 is not None
-    assert request.frames[0].image_media_type == 'image/png'
+    assert request.frames[0].image_media_type == 'image/jpeg'
     assert not hasattr(request.frames[0], 'path')
 
 
@@ -361,7 +384,7 @@ def test_build_analysis_request_uses_controlled_frame_and_transcript_evidence(tm
     assert request.transcript is not None
     assert request.transcript.text == 'Narration.'
     assert request.frames[0].image_base64 is not None
-    assert request.frames[0].image_media_type == 'image/png'
+    assert request.frames[0].image_media_type == 'image/jpeg'
     prepared.workspace.cleanup(state='success')
 
 
@@ -373,9 +396,87 @@ def test_failure_message_mapping_covers_safe_error_paths() -> None:
         (MediaProbeError('ffprobe'), "I couldn't inspect this MP4 safely with FFprobe, so the explanation could not continue."),
         (MediaExtractionError('ffmpeg'), "I couldn't prepare media evidence safely with FFmpeg, so the explanation could not continue."),
         (AnalysisTimeoutError('timeout'), 'Claude took too long to analyze this video, so no explanation was posted. Please try again.'),
+        (AnalysisBudgetError('budget'), "I couldn't fit this video evidence within the safe Claude request budget, so no explanation was posted. Please try a shorter or simpler clip in this thread."),
         (AnalysisProviderError('provider'), "Claude couldn't analyze this video successfully, so no explanation was posted. Please try again."),
         (AnalysisInvalidResponseError('invalid'), 'Claude returned an invalid explanation format, so no explanation was posted. Please try again.'),
     ]
 
     for exc, expected in cases:
         assert failure_message_for_exception(exc) == expected
+
+
+def test_build_analysis_request_large_frame_fixture_stays_within_budget(tmp_path: Path) -> None:
+    fixture = build_mp4_fixture(
+        tmp_path,
+        name='large-frame-budget',
+        with_audio=True,
+        duration_seconds=2,
+        size='1920x1080',
+    )
+    prepared = prepare_media_evidence(
+        byte_stream=[fixture.read_bytes()],
+        request_id='large-frame-budget',
+        untrusted_filename='large-frame-budget.mp4',
+        temp_root=tmp_path / 'workspaces',
+        transcriber=FakeTranscriber(text='Narration.', timestamps_available=True),
+    )
+
+    request = build_analysis_request(prepared)
+    envelope = build_prompt_envelope(request)
+
+    assert request.frames
+    assert all(frame.image_media_type == 'image/jpeg' for frame in request.frames)
+    assert sum(len(frame.image_base64 or '') for frame in request.frames) <= MAX_TOTAL_IMAGE_BASE64_CHARS
+    assert len(envelope.user_prompt) <= MAX_USER_PROMPT_CHARS
+    assert 'image_base64' not in envelope.user_prompt
+    prepared.workspace.cleanup(state='success')
+
+
+def test_explanation_budget_overflow_posts_safe_failure_and_cleans_workspace(tmp_path: Path) -> None:
+    fixture = build_mp4_fixture(tmp_path, name='budget-overflow', with_audio=True, duration_seconds=1)
+    temp_root = tmp_path / 'work'
+    adapter = FakeAdapter(fixture.read_bytes())
+    client = FakeSlackClient()
+    analyzer = BudgetCheckingAnalyzer()
+    oversized_transcript = 'a' * 25000
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: adapter,
+        analyzer_factory=lambda: analyzer,
+        executor=ImmediateExecutor(),
+        logger=logging.getLogger('tests.explanation.budget'),
+        temp_root=temp_root,
+        transcriber=FakeTranscriber(text=oversized_transcript, timestamps_available=True),
+    )
+
+    orchestrator.enqueue(client=client, session=make_session())
+
+    assert analyzer.calls
+    assert client.calls[0]['text'] == (
+        "I couldn't fit this video evidence within the safe Claude request budget, so no explanation was posted. "
+        'Please try a shorter or simpler clip in this thread.'
+    )
+    assert temp_root.exists() is True
+    assert list(temp_root.iterdir()) == []
+
+
+def test_explanation_provider_rejection_posts_safe_failure_and_cleans_workspace(tmp_path: Path) -> None:
+    fixture = build_mp4_fixture(tmp_path, name='provider-rejection', with_audio=True, duration_seconds=1)
+    temp_root = tmp_path / 'work'
+    adapter = FakeAdapter(fixture.read_bytes())
+    client = FakeSlackClient()
+    analyzer = ProviderRejectingAnalyzer()
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: adapter,
+        analyzer_factory=lambda: analyzer,
+        executor=ImmediateExecutor(),
+        logger=logging.getLogger('tests.explanation.provider_rejection'),
+        temp_root=temp_root,
+        transcriber=FakeTranscriber(text='Narration.', timestamps_available=True),
+    )
+
+    orchestrator.enqueue(client=client, session=make_session())
+
+    assert analyzer.calls
+    assert client.calls[0]['text'] == "Claude couldn't analyze this video successfully, so no explanation was posted. Please try again."
+    assert temp_root.exists() is True
+    assert list(temp_root.iterdir()) == []
