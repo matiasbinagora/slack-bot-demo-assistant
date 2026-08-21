@@ -1,4 +1,4 @@
-from slack_video_assistant.config import ConfigError, SlackSettings
+from slack_video_assistant.config import ClaudeSettings, ConfigError, SlackSettings
 
 
 def test_loads_valid_slack_settings() -> None:
@@ -60,3 +60,22 @@ def test_invalid_max_video_bytes_is_reported_safely() -> None:
         raise AssertionError("Expected ConfigError")
 
     assert message == "MAX_VIDEO_BYTES must be an integer."
+
+
+def test_loads_valid_claude_settings() -> None:
+    settings = ClaudeSettings.from_env({"ANTHROPIC_API_KEY": "sk-ant-test-key"})
+
+    assert settings.api_key == "sk-ant-test-key"
+
+
+def test_missing_claude_api_key_is_reported_safely() -> None:
+    try:
+        ClaudeSettings.from_env({})
+    except ConfigError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected ConfigError")
+
+    assert "ANTHROPIC_API_KEY" in message
+    assert "sk-ant" not in message
+    assert "http" not in message
