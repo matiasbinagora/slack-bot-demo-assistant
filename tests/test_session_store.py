@@ -84,3 +84,21 @@ def test_session_store_does_not_reopen_cancelled_sessions() -> None:
     session = store.get(key)
     assert session is not None
     assert session.status is SessionStatus.CANCELLATION_CONSUMED
+
+
+def test_session_store_can_roll_back_failed_explain_start_for_retry() -> None:
+    store = ThreadSessionStore()
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    explained = store.apply_command(key, CanonicalCommand.EXPLAIN)
+    rolled_back = store.rollback_explain_request(key)
+    retried = store.apply_command(key, CanonicalCommand.EXPLAIN)
+
+    assert explained.reason == "explanation_requested"
+    assert rolled_back.reason == "explanation_rollback"
+    assert rolled_back.session is not None
+    assert rolled_back.session.status is SessionStatus.VIDEO_RECEIVED
+    assert retried.reason == "explanation_requested"
+    assert retried.session is not None
+    assert retried.session.status is SessionStatus.EXPLANATION_REQUESTED

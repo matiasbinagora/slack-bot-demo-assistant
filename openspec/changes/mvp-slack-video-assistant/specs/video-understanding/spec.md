@@ -45,7 +45,7 @@ The pipeline SHALL process video understanding only after an explicit user reque
 #### Scenario: Explanation request
 
 - **WHEN** the user sends `explain` or an accepted equivalent for a valid video session
-- **THEN** the pipeline extracts the configured evidence, invokes the Claude boundary, and renders the resulting English explanation in the same thread
+- **THEN** the pipeline extracts bounded configured evidence, passes frame images through the approved multimodal Claude boundary only when the request stays within the safe budget, and renders the resulting English explanation in the same thread
 
 ### Requirement: Explanation result and failure behavior
 

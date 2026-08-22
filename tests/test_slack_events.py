@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from slack_video_assistant.explanation_orchestrator import ExplanationOrchestrator
 from slack_video_assistant.session_store import (
     CanonicalCommand,
     SessionKey,
@@ -41,6 +42,24 @@ class FakeDownloader:
         raise AssertionError(f"download should not run in this task slice: {url} {headers}")
 
 
+
+
+class RecordingExplanationOrchestrator:
+    def __init__(self) -> None:
+        self.sessions = []
+
+    def enqueue(self, *, client: Any, session) -> None:
+        self.sessions.append((client, session))
+
+
+class RaisingExplanationOrchestrator:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def enqueue(self, *, client: Any, session) -> None:
+        self.calls += 1
+        raise RuntimeError("executor failed")
+
 class FakeApp:
     def __init__(self) -> None:
         self.handlers: dict[str, Any] = {}
@@ -53,7 +72,9 @@ class FakeApp:
         return _register
 
 
-def make_handler() -> tuple[SlackEventHandler, ThreadSessionStore]:
+def make_handler(
+    explanation_orchestrator: ExplanationOrchestrator | RecordingExplanationOrchestrator | None = None,
+) -> tuple[SlackEventHandler, ThreadSessionStore]:
     store = ThreadSessionStore()
 
     def _factory(client: Any) -> SlackFileAdapter:
@@ -70,6 +91,7 @@ def make_handler() -> tuple[SlackEventHandler, ThreadSessionStore]:
             session_store=store,
             processed_events=ProcessedEventStore(),
             logger=logging.getLogger("tests.slack_events"),
+            explanation_orchestrator=explanation_orchestrator,
         ),
         store,
     )
@@ -368,8 +390,112 @@ def test_message_requires_real_thread_context_and_ignores_root_messages() -> Non
     assert session.status is SessionStatus.VIDEO_RECEIVED
 
 
-def test_retried_event_and_bot_message_do_not_duplicate_effects() -> None:
+
+
+def test_missing_explanation_orchestrator_posts_safe_failure_without_mutating_session() -> None:
     handler, store = make_handler()
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id='T1', channel_id='C1', thread_ts='170.0001')
+    store.receive_video(key, file_id='F1')
+
+    handler.handle_message(
+        body={
+            'event_id': 'Ev-missing-orchestrator',
+            'team_id': 'T1',
+            'event': {'type': 'message', 'channel': 'C1', 'thread_ts': '170.0001', 'text': 'explain'},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert [call for call in client.calls if call[0] == 'chat_postMessage'] == [
+        (
+            'chat_postMessage',
+            {
+                'channel': 'C1',
+                'thread_ts': '170.0001',
+                'text': "I couldn't start the explanation job safely. Please try again in this thread.",
+            },
+        )
+    ]
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.VIDEO_RECEIVED
+
+
+
+
+def test_explain_enqueue_failure_posts_safe_error_and_allows_retry() -> None:
+    failing_orchestrator = RaisingExplanationOrchestrator()
+    handler, store = make_handler(failing_orchestrator)
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-raise-1",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "explain"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    session = store.get(key)
+    assert failing_orchestrator.calls == 1
+    assert session is not None
+    assert session.status is SessionStatus.VIDEO_RECEIVED
+    assert [call for call in client.calls if call[0] == "chat_postMessage"] == [
+        (
+            "chat_postMessage",
+            {
+                "channel": "C1",
+                "thread_ts": "170.0001",
+                "text": "I couldn't start the explanation job safely. Please try again in this thread.",
+            },
+        )
+    ]
+
+    retry_orchestrator = RecordingExplanationOrchestrator()
+    retry_handler = SlackEventHandler(
+        file_adapter_factory=handler._file_adapter_factory,
+        session_store=store,
+        processed_events=ProcessedEventStore(),
+        logger=logging.getLogger("tests.slack_events.retry"),
+        explanation_orchestrator=retry_orchestrator,
+    )
+    retry_client = FakeSlackClient(make_file_response())
+
+    retry_handler.handle_message(
+        body={
+            "event_id": "Ev-raise-2",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "explain"},
+        },
+        ack=lambda: None,
+        client=retry_client,
+    )
+
+    session = store.get(key)
+    assert len(retry_orchestrator.sessions) == 1
+    assert session is not None
+    assert session.status is SessionStatus.EXPLANATION_REQUESTED
+    assert [call for call in retry_client.calls if call[0] == "chat_postMessage"] == [
+        (
+            "chat_postMessage",
+            {
+                "channel": "C1",
+                "thread_ts": "170.0001",
+                "text": "I’m preparing an explanation for this video now. I’ll reply in this thread when it’s ready.",
+            },
+        )
+    ]
+
+
+def test_retried_event_and_bot_message_do_not_duplicate_effects() -> None:
+    orchestrator = RecordingExplanationOrchestrator()
+    handler, store = make_handler(orchestrator)
     client = FakeSlackClient(make_file_response())
     key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
     store.receive_video(key, file_id="F1")
@@ -403,10 +529,11 @@ def test_retried_event_and_bot_message_do_not_duplicate_effects() -> None:
             {
                 "channel": "C1",
                 "thread_ts": "170.0001",
-                "text": "Explanation request noted. This task slice only records the thread state; no Claude analysis runs yet.",
+                "text": "I’m preparing an explanation for this video now. I’ll reply in this thread when it’s ready.",
             },
         )
     ]
+    assert len(orchestrator.sessions) == 1
     session = store.get(key)
     assert session is not None
     assert session.status is SessionStatus.EXPLANATION_REQUESTED

@@ -19,6 +19,13 @@ from slack_video_assistant.logging_utils import redact_sensitive
 DEFAULT_MAX_VIDEO_BYTES = 104857600
 DEFAULT_MAX_VIDEO_DURATION_SECONDS = 300.0
 DEFAULT_FRAME_COUNT = 3
+MAX_FRAME_EDGE_PIXELS = 512
+FRAME_JPEG_QUALITY = 8
+FRAME_END_MARGIN_SECONDS = 0.25
+SHORT_VIDEO_SEGMENT_SECONDS = 10.0
+LONG_VIDEO_SEGMENT_SECONDS = 30.0
+SHORT_VIDEO_SEGMENT_THRESHOLD_SECONDS = 30.0
+MAX_SEGMENTS = 10
 
 
 class MediaPipelineError(RuntimeError):
@@ -62,6 +69,19 @@ class ExtractedFrame:
 
 
 @dataclass(frozen=True)
+class SegmentInterval:
+    index: int
+    start_seconds: float
+    end_seconds: float
+
+
+@dataclass(frozen=True)
+class PreparedSegmentEvidence:
+    interval: SegmentInterval
+    frames: tuple[ExtractedFrame, ...]
+
+
+@dataclass(frozen=True)
 class TranscriptionResult:
     transcript_text: str
     timestamps_available: bool
@@ -79,6 +99,7 @@ class AudioEvidence:
     transcript_path: Path | None = None
     transcript_text: str | None = None
     timestamps_available: bool = False
+    transcription_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -104,9 +125,18 @@ class MediaWorkspace:
 
     @classmethod
     def create(cls, *, temp_root: Path | None = None, request_id: str | None = None) -> "MediaWorkspace":
-        base_root = temp_root.resolve() if temp_root is not None else None
+        base_root = _prepare_temp_root(temp_root)
         prefix = f"slack-video-assistant-{_normalize_request_id(request_id)}-"
-        root = Path(tempfile.mkdtemp(prefix=prefix, dir=base_root))
+        try:
+            root = Path(tempfile.mkdtemp(prefix=prefix, dir=base_root))
+        except FileNotFoundError as exc:
+            raise MediaValidationError(
+                "The configured video temp directory is unavailable for analysis."
+            ) from exc
+        except PermissionError as exc:
+            raise MediaValidationError(
+                "The configured video temp directory is unavailable for analysis."
+            ) from exc
         os.chmod(root, 0o700)
         return cls(root)
 
@@ -171,6 +201,7 @@ def prepare_media_evidence(
     max_bytes: int = DEFAULT_MAX_VIDEO_BYTES,
     max_duration_seconds: float = DEFAULT_MAX_VIDEO_DURATION_SECONDS,
     frame_count: int = DEFAULT_FRAME_COUNT,
+    extract_representative_frames: bool = True,
     ffprobe_command: str = "ffprobe",
     ffmpeg_command: str = "ffmpeg",
     transcriber: AudioTranscriber | None = None,
@@ -185,12 +216,16 @@ def prepare_media_evidence(
             ffprobe_command=ffprobe_command,
             max_duration_seconds=max_duration_seconds,
         )
-        frames = extract_frames(
-            source_path,
-            workspace=workspace,
-            duration_seconds=metadata.duration_seconds,
-            frame_count=frame_count,
-            ffmpeg_command=ffmpeg_command,
+        frames = (
+            extract_frames(
+                source_path,
+                workspace=workspace,
+                duration_seconds=metadata.duration_seconds,
+                frame_count=frame_count,
+                ffmpeg_command=ffmpeg_command,
+            )
+            if extract_representative_frames
+            else ()
         )
         audio_evidence = build_audio_evidence(
             source_path,
@@ -308,7 +343,7 @@ def extract_frames(
     frame_timestamps = _select_frame_timestamps(duration_seconds=duration_seconds, frame_count=frame_count)
     extracted: list[ExtractedFrame] = []
     for index, timestamp_seconds in enumerate(frame_timestamps, start=1):
-        output_path = workspace.controlled_path(f"frames/frame-{index:02d}.png")
+        output_path = workspace.controlled_path(f"frames/frame-{index:02d}.jpg")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         _run_ffmpeg(
             [
@@ -320,8 +355,12 @@ def extract_frames(
                 f"{timestamp_seconds:.3f}",
                 "-i",
                 str(source_path),
+                "-vf",
+                f"scale={MAX_FRAME_EDGE_PIXELS}:{MAX_FRAME_EDGE_PIXELS}:force_original_aspect_ratio=decrease",
                 "-frames:v",
                 "1",
+                "-q:v",
+                str(FRAME_JPEG_QUALITY),
                 str(output_path),
             ],
             failure_message="FFmpeg could not extract a representative frame.",
@@ -335,6 +374,87 @@ def extract_frames(
         )
 
     return tuple(extracted)
+
+
+def plan_segment_intervals(duration_seconds: float) -> tuple[SegmentInterval, ...]:
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+        raise MediaValidationError("This MP4 is missing a usable duration for analysis.")
+
+    segment_seconds = (
+        SHORT_VIDEO_SEGMENT_SECONDS
+        if duration_seconds <= SHORT_VIDEO_SEGMENT_THRESHOLD_SECONDS
+        else LONG_VIDEO_SEGMENT_SECONDS
+    )
+    intervals: list[SegmentInterval] = []
+    start_seconds = 0.0
+    index = 1
+    while start_seconds < duration_seconds:
+        end_seconds = min(start_seconds + segment_seconds, duration_seconds)
+        intervals.append(
+            SegmentInterval(
+                index=index,
+                start_seconds=round(start_seconds, 3),
+                end_seconds=round(end_seconds, 3),
+            )
+        )
+        start_seconds = end_seconds
+        index += 1
+
+    if len(intervals) > MAX_SEGMENTS:
+        raise MediaValidationError("This MP4 is longer than the 5 minute limit for the MVP.")
+    return tuple(intervals)
+
+
+def extract_segment_frames(
+    source_path: Path,
+    *,
+    workspace: MediaWorkspace,
+    interval: SegmentInterval,
+    frame_count: int = DEFAULT_FRAME_COUNT,
+    ffmpeg_command: str = "ffmpeg",
+) -> PreparedSegmentEvidence:
+    if frame_count <= 0:
+        raise MediaValidationError("Frame extraction requires at least one frame.")
+
+    frame_timestamps = _select_segment_frame_timestamps(
+        start_seconds=interval.start_seconds,
+        end_seconds=interval.end_seconds,
+        frame_count=frame_count,
+    )
+    segment_dir = workspace.controlled_path(f"segments/segment-{interval.index:02d}/frames")
+    segment_dir.mkdir(parents=True, exist_ok=True)
+    extracted: list[ExtractedFrame] = []
+    for frame_index, timestamp_seconds in enumerate(frame_timestamps, start=1):
+        output_path = segment_dir / f"frame-{frame_index:02d}.jpg"
+        _run_ffmpeg(
+            [
+                ffmpeg_command,
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                f"{timestamp_seconds:.3f}",
+                "-i",
+                str(source_path),
+                "-vf",
+                f"scale={MAX_FRAME_EDGE_PIXELS}:{MAX_FRAME_EDGE_PIXELS}:force_original_aspect_ratio=decrease",
+                "-frames:v",
+                "1",
+                "-q:v",
+                str(FRAME_JPEG_QUALITY),
+                str(output_path),
+            ],
+            failure_message="FFmpeg could not extract a representative frame.",
+        )
+        extracted.append(
+            ExtractedFrame(
+                path=output_path,
+                label=f"segment-{interval.index:02d}-frame-{frame_index:02d}",
+                timestamp_seconds=timestamp_seconds,
+            )
+        )
+
+    return PreparedSegmentEvidence(interval=interval, frames=tuple(extracted))
 
 
 def build_audio_evidence(
@@ -393,6 +513,7 @@ def build_audio_evidence(
             status=EvidenceStatus.DEGRADED,
             detail="Audio was extracted, but transcription failed safely and no transcript was retained.",
             audio_path=audio_path,
+            transcription_failed=True,
         )
 
     transcript_path = workspace.controlled_path("transcript/transcript.txt")
@@ -502,18 +623,64 @@ def _validate_duration_limit(max_duration_seconds: float) -> None:
         raise MediaValidationError("The configured video duration limit is invalid.")
 
 
+def _prepare_temp_root(temp_root: Path | None) -> Path | None:
+    if temp_root is None:
+        return None
+
+    try:
+        temp_root.mkdir(parents=True, exist_ok=True)
+    except FileExistsError as exc:
+        raise MediaValidationError(
+            "The configured video temp directory is unavailable for analysis."
+        ) from exc
+    except OSError as exc:
+        raise MediaValidationError(
+            "The configured video temp directory is unavailable for analysis."
+        ) from exc
+
+    try:
+        return temp_root.resolve()
+    except OSError as exc:
+        raise MediaValidationError(
+            "The configured video temp directory is unavailable for analysis."
+        ) from exc
+
+
 def _select_frame_timestamps(*, duration_seconds: float, frame_count: int) -> tuple[float, ...]:
     if duration_seconds <= 0:
         return (0.0,)
     if frame_count == 1:
         return (0.0,)
 
-    max_timestamp = max(duration_seconds - 0.05, 0.0)
+    max_timestamp = max(duration_seconds - FRAME_END_MARGIN_SECONDS, 0.0)
     if max_timestamp == 0.0:
         return (0.0,)
 
     step = max_timestamp / (frame_count - 1)
     timestamps = {round(step * index, 3) for index in range(frame_count)}
+    return tuple(sorted(timestamps))
+
+
+def _select_segment_frame_timestamps(
+    *, start_seconds: float, end_seconds: float, frame_count: int
+) -> tuple[float, ...]:
+    duration_seconds = max(end_seconds - start_seconds, 0.0)
+    if duration_seconds <= 0:
+        return (round(start_seconds, 3),)
+    if frame_count == 1:
+        return (round(start_seconds, 3),)
+
+    max_timestamp = max(end_seconds - FRAME_END_MARGIN_SECONDS, start_seconds)
+    midpoint = start_seconds + (duration_seconds / 2)
+    candidates = (
+        start_seconds,
+        midpoint,
+        max_timestamp,
+    )
+    bounded = [min(max(candidate, start_seconds), max_timestamp) for candidate in candidates]
+    timestamps = {round(timestamp, 3) for timestamp in bounded[:frame_count]}
+    if not timestamps:
+        timestamps.add(round(start_seconds, 3))
     return tuple(sorted(timestamps))
 
 

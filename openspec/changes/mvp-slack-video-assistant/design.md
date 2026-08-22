@@ -45,6 +45,7 @@ Un adaptador encapsulará descarga autenticada de archivos, publicación de mens
 ### 4. Frontera explícita para Claude Agent SDK
 
 El dominio recibirá una interfaz de análisis que acepte evidencia multimedia local y una solicitud de usuario, y devuelva un resultado estructurado o un error tipado. La implementación concreta usará Claude Agent SDK y `ANTHROPIC_API_KEY` desde el entorno. Los prompts no contendrán tokens, URLs privadas ni instrucciones que conviertan contenido de video o transcripciones en configuración del sistema.
+La representación de frames en esa frontera seguirá siendo controlada y local: el pipeline entregará imágenes seleccionadas como thumbnails JPEG acotados en bloques multimodales soportados por el proveedor, nunca como rutas locales ni URLs privadas de Slack. El prompt textual incluirá solo metadatos/redacciones de la evidencia y una marca de que la imagen va adjunta, sin serializar Base64 de frames dentro del texto. Para mantener el request dentro del presupuesto del proveedor, la integración rechazará de forma segura cualquier request cuya suma de texto, transcript y payloads de imagen exceda el presupuesto configurado antes de invocar a Claude.
 
 En tests se mockeará la interfaz; no se harán llamadas reales a Claude. Los errores de proveedor, timeout o respuesta inválida se mostrarán como fallos y nunca como una explicación exitosa.
 

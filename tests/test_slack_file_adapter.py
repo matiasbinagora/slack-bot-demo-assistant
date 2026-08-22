@@ -18,12 +18,20 @@ class FakeSlackClient:
 
 
 class FakeDownloadResponse:
-    def __init__(self, chunks):
-        self._chunks = chunks
+    def __init__(self, chunks=None, *, error: Exception | None = None):
+        self._chunks = list(chunks or [])
+        self._error = error
+        self.closed = 0
 
     def iter_bytes(self, chunk_size: int = 65536):
         del chunk_size
-        yield from self._chunks
+        for chunk in self._chunks:
+            yield chunk
+        if self._error is not None:
+            raise self._error
+
+    def close(self) -> None:
+        self.closed += 1
 
 
 class FakeDownloader:
@@ -131,3 +139,52 @@ def test_download_file_redacts_failure_details_and_cleans_workspace(tmp_path: Pa
     assert "[REDACTED_TOKEN]" in message
     assert "[REDACTED_URL]" in message
     assert list(tmp_path.iterdir()) == []
+
+
+def test_iter_download_bytes_closes_response_on_success(tmp_path: Path) -> None:
+    response = FakeDownloadResponse([b"abc", b"def"])
+    adapter = SlackFileAdapter(
+        bot_token="xoxb-secret-token",
+        client=FakeSlackClient(make_response()),
+        downloader=FakeDownloader(response=response),
+        max_bytes=10,
+        temp_root=tmp_path,
+    )
+
+    record = adapter.get_file_record("F1")
+    assert b"".join(adapter.iter_download_bytes(record)) == b"abcdef"
+    assert response.closed == 1
+
+
+def test_iter_download_bytes_closes_response_on_iterator_failure(tmp_path: Path) -> None:
+    response = FakeDownloadResponse([b"abc"], error=RuntimeError("download failed for https://files.slack.com/private with xoxb-secret-token"))
+    adapter = SlackFileAdapter(
+        bot_token="xoxb-secret-token",
+        client=FakeSlackClient(make_response()),
+        downloader=FakeDownloader(response=response),
+        max_bytes=10,
+        temp_root=tmp_path,
+    )
+
+    record = adapter.get_file_record("F1")
+    iterator = adapter.iter_download_bytes(record)
+    with pytest.raises(RuntimeError):
+        list(iterator)
+    assert response.closed == 1
+
+
+def test_iter_download_bytes_closes_response_when_consumer_interrupts(tmp_path: Path) -> None:
+    response = FakeDownloadResponse([b"abc", b"def"])
+    adapter = SlackFileAdapter(
+        bot_token="xoxb-secret-token",
+        client=FakeSlackClient(make_response()),
+        downloader=FakeDownloader(response=response),
+        max_bytes=10,
+        temp_root=tmp_path,
+    )
+
+    record = adapter.get_file_record("F1")
+    iterator = adapter.iter_download_bytes(record)
+    assert next(iterator) == b"abc"
+    iterator.close()
+    assert response.closed == 1

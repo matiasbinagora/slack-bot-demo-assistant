@@ -4,10 +4,12 @@ from dataclasses import dataclass
 from logging import Logger
 from typing import Any, Callable, Mapping
 
+from slack_video_assistant.explanation_orchestrator import ExplanationOrchestrator
 from slack_video_assistant.logging_utils import redact_sensitive
 from slack_video_assistant.session_store import (
     CanonicalCommand,
     SessionKey,
+    SessionStatus,
     ThreadSessionStore,
     TransitionResult,
 )
@@ -45,11 +47,13 @@ class SlackEventHandler:
         session_store: ThreadSessionStore,
         processed_events: ProcessedEventStore,
         logger: Logger,
+        explanation_orchestrator: ExplanationOrchestrator | None = None,
     ) -> None:
         self._file_adapter_factory = file_adapter_factory
         self._session_store = session_store
         self._processed_events = processed_events
         self._logger = logger
+        self._explanation_orchestrator = explanation_orchestrator
 
     def handle_file_shared(self, *, body: Mapping[str, Any], ack: AckCallable, client: Any) -> None:
         ack()
@@ -135,7 +139,46 @@ class SlackEventHandler:
             channel_id=context.channel_id,
             thread_ts=context.thread_ts,
         )
+        existing_session = self._session_store.get(key)
+        if (
+            command is CanonicalCommand.EXPLAIN
+            and self._explanation_orchestrator is None
+            and existing_session is not None
+            and existing_session.status in (SessionStatus.VIDEO_RECEIVED, SessionStatus.EXPLANATION_REQUESTED)
+        ):
+            self._post_message(
+                client,
+                channel=context.channel_id,
+                thread_ts=context.thread_ts,
+                text="I couldn't start the explanation job safely. Please try again in this thread.",
+            )
+            return
+
         result = self._session_store.apply_command(key, command)
+        if command is CanonicalCommand.EXPLAIN and result.reason == "explanation_requested" and result.session:
+            try:
+                if self._explanation_orchestrator is None:
+                    raise RuntimeError("missing explanation orchestrator")
+                self._explanation_orchestrator.enqueue(client=client, session=result.session)
+            except Exception:
+                self._logger.exception("Explanation orchestration failed to start")
+                self._session_store.rollback_explain_request(key)
+                self._post_message(
+                    client,
+                    channel=context.channel_id,
+                    thread_ts=context.thread_ts,
+                    text="I couldn't start the explanation job safely. Please try again in this thread.",
+                )
+                return
+
+            self._post_message(
+                client,
+                channel=context.channel_id,
+                thread_ts=context.thread_ts,
+                text="I’m preparing an explanation for this video now. I’ll reply in this thread when it’s ready.",
+            )
+            return
+
         self._post_message(
             client,
             channel=context.channel_id,
@@ -306,7 +349,7 @@ def _message_for_transition(command: CanonicalCommand, result: TransitionResult)
 
     if command is CanonicalCommand.EXPLAIN:
         if result.reason == "explanation_requested":
-            return "Explanation request noted. This task slice only records the thread state; no Claude analysis runs yet."
+            return "I’m preparing an explanation for this video now. I’ll reply in this thread when it’s ready."
         if result.reason == "export_confirmation_pending":
             return "An export confirmation is already pending for this thread. Reply with `confirm` or `cancel` before requesting anything else."
         if result.reason == "explanation_no_longer_available":

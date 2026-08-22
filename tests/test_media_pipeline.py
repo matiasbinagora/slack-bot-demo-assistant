@@ -11,15 +11,21 @@ from slack_video_assistant.media_pipeline import (
     CleanupResult,
     DEFAULT_MAX_VIDEO_DURATION_SECONDS,
     EvidenceStatus,
+    MAX_SEGMENTS,
     MediaExtractionError,
     MediaProbeError,
     MediaValidationError,
     MediaWorkspace,
+    SegmentInterval,
+    SHORT_VIDEO_SEGMENT_SECONDS,
+    LONG_VIDEO_SEGMENT_SECONDS,
     TranscriptionResult,
     VideoMetadata,
     _optional_string,
     build_audio_evidence,
+    extract_segment_frames,
     extract_frames,
+    plan_segment_intervals,
     prepare_media_evidence,
     probe_video,
 )
@@ -66,6 +72,88 @@ def test_prepare_media_evidence_accepts_valid_mp4_and_uses_controlled_paths(tmp_
     cleanup = prepared.workspace.cleanup(state="success")
     assert cleanup.succeeded is True
     assert prepared.workspace.root.exists() is False
+
+
+def test_prepare_media_evidence_can_skip_full_video_frames_for_segmented_analysis(tmp_path: Path) -> None:
+    source_fixture = build_mp4_fixture(tmp_path, name="valid-audio-segmented", with_audio=True, duration_seconds=2)
+
+    prepared = prepare_media_evidence(
+        byte_stream=[source_fixture.read_bytes()],
+        request_id="Request segmented",
+        untrusted_filename="clip.mp4",
+        temp_root=tmp_path,
+        extract_representative_frames=False,
+    )
+
+    assert prepared.frames == ()
+    assert prepared.audio_evidence.audio_path == prepared.workspace.controlled_path("audio/source.wav")
+    cleanup = prepared.workspace.cleanup(state="success")
+    assert cleanup.succeeded is True
+
+
+def test_plan_segment_intervals_for_25_seconds_uses_10_10_5() -> None:
+    intervals = plan_segment_intervals(25.0)
+
+    assert [interval.start_seconds for interval in intervals] == [0.0, 10.0, 20.0]
+    assert [interval.end_seconds for interval in intervals] == [10.0, 20.0, 25.0]
+    assert all(
+        current.end_seconds == following.start_seconds
+        for current, following in zip(intervals, intervals[1:])
+    )
+
+
+def test_plan_segment_intervals_for_65_seconds_uses_30_30_5() -> None:
+    intervals = plan_segment_intervals(65.0)
+
+    assert [interval.start_seconds for interval in intervals] == [0.0, 30.0, 60.0]
+    assert [interval.end_seconds for interval in intervals] == [30.0, 60.0, 65.0]
+
+
+def test_plan_segment_intervals_for_300_seconds_stays_within_10_segments() -> None:
+    intervals = plan_segment_intervals(300.0)
+
+    assert len(intervals) == MAX_SEGMENTS
+    assert intervals[-1].end_seconds == 300.0
+    assert all(
+        (interval.end_seconds - interval.start_seconds) in {SHORT_VIDEO_SEGMENT_SECONDS, LONG_VIDEO_SEGMENT_SECONDS}
+        or interval.end_seconds == 300.0
+        for interval in intervals[:-1]
+    )
+
+
+def test_extract_segment_frames_uses_absolute_timestamps_and_caps_to_three_frames(tmp_path: Path) -> None:
+    source_fixture = build_mp4_fixture(tmp_path, name="segment-frames", with_audio=False, duration_seconds=65)
+    workspace = MediaWorkspace.create(temp_root=tmp_path, request_id="segment-frames")
+
+    segment = extract_segment_frames(
+        source_fixture,
+        workspace=workspace,
+        interval=SegmentInterval(index=2, start_seconds=30.0, end_seconds=60.0),
+    )
+
+    assert len(segment.frames) <= 3
+    assert [frame.timestamp_seconds for frame in segment.frames] == [30.0, 45.0, 59.75]
+    assert all(frame.path.exists() for frame in segment.frames)
+    assert all(workspace.root in frame.path.parents for frame in segment.frames)
+    workspace.cleanup(state="success")
+
+
+def test_extract_segment_frames_deduplicates_short_final_interval(tmp_path: Path) -> None:
+    source_fixture = build_mp4_fixture(tmp_path, name="short-final-segment", with_audio=False, duration_seconds=1)
+    workspace = MediaWorkspace.create(temp_root=tmp_path, request_id="short-final")
+
+    segment = extract_segment_frames(
+        source_fixture,
+        workspace=workspace,
+        interval=SegmentInterval(index=3, start_seconds=0.8, end_seconds=1.0),
+    )
+
+    timestamps = [frame.timestamp_seconds for frame in segment.frames]
+    assert len(segment.frames) <= 3
+    assert timestamps == sorted(set(timestamps))
+    assert min(timestamps) >= 0.8
+    assert max(timestamps) <= 1.0
+    workspace.cleanup(state="success")
 
 
 def test_prepare_media_evidence_rejects_non_mp4_content_even_with_mp4_name(tmp_path: Path) -> None:

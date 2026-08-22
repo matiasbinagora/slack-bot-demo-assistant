@@ -64,3 +64,17 @@ Tests SHALL replace the Claude Agent SDK client with a mock or fake and SHALL no
 
 - **WHEN** tests execute success, malformed response, timeout, and provider error cases
 - **THEN** they use a mock boundary and assert the user-visible result without a network call or secret value
+
+### Requirement: Bounded Claude request budget
+
+The Claude integration SHALL keep transcript text plus multimodal frame evidence within a documented safe request budget before invoking the provider, and SHALL fail safely without a partial summary when that budget cannot be met.
+
+#### Scenario: Controlled frame payload
+
+- **WHEN** visual evidence is prepared for Claude
+- **THEN** the request contains only bounded multimodal frame payloads and never an unbounded full-frame Base64 blob in the text prompt
+
+#### Scenario: Request budget exceeded
+
+- **WHEN** the prepared evidence still exceeds the configured Claude request budget
+- **THEN** the provider is not invoked, the thread receives a safe English failure, and cleanup still runs
