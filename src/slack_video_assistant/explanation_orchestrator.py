@@ -14,10 +14,10 @@ from slack_video_assistant.claude_analysis import (
     AnalysisProviderError,
     AnalysisRequest,
     AnalysisResult,
+    AnalysisTimestamp,
     AnalysisTimeoutError,
     ClaudeAnalyzer,
     FrameEvidence,
-    TranscriptEvidence,
     build_claude_analyzer,
 )
 from slack_video_assistant.logging_utils import redact_sensitive
@@ -28,6 +28,10 @@ from slack_video_assistant.media_pipeline import (
     MediaProbeError,
     MediaValidationError,
     PreparedMediaEvidence,
+    PreparedSegmentEvidence,
+    SegmentInterval,
+    extract_segment_frames,
+    plan_segment_intervals,
     prepare_media_evidence,
 )
 from slack_video_assistant.session_store import ThreadSession
@@ -52,10 +56,6 @@ class ExplanationContext:
 class LocalThreadExecutor:
     def submit(self, job: Callable[[], None]) -> None:
         threading.Thread(target=job, daemon=True).start()
-
-
-class TranscriptionFailureError(RuntimeError):
-    pass
 
 
 class ExplanationOrchestrator:
@@ -101,41 +101,109 @@ class ExplanationOrchestrator:
                 temp_root=self._temp_root,
                 max_bytes=self._max_video_bytes,
                 max_duration_seconds=self._max_video_duration_seconds,
+                extract_representative_frames=False,
                 transcriber=self._transcriber,
             )
             workspace = prepared.workspace
-
-            if prepared.audio_evidence.transcription_failed:
-                raise TranscriptionFailureError(prepared.audio_evidence.detail)
-
             analyzer = self._analyzer_factory()
-            result = analyzer.analyze(build_analysis_request(prepared))
-            self._post_message(
-                client,
-                channel=context.channel_id,
-                thread_ts=context.thread_ts,
-                text=render_explanation_reply(result=result, audio_evidence=prepared.audio_evidence),
+            interval_results = analyze_video_segments(
+                prepared=prepared,
+                analyzer=analyzer,
             )
-            terminal_state = "success"
+            publish_succeeded = True
+            for message in render_explanation_replies(
+                interval_results=interval_results,
+                audio_evidence=prepared.audio_evidence,
+            ):
+                publish_succeeded = (
+                    self._post_message(
+                        client,
+                        channel=context.channel_id,
+                        thread_ts=context.thread_ts,
+                        text=message,
+                    )
+                    and publish_succeeded
+                )
+            terminal_state = "success" if publish_succeeded else "publish_failure"
         except Exception as exc:
-            self._post_message(
+            publish_succeeded = self._post_message(
                 client,
                 channel=context.channel_id,
                 thread_ts=context.thread_ts,
                 text=failure_message_for_exception(exc),
             )
+            terminal_state = "failure" if publish_succeeded else "publish_failure"
         finally:
             if workspace is not None:
                 workspace.cleanup(state=terminal_state, logger=self._logger)
 
-    def _post_message(self, client: Any, *, channel: str, thread_ts: str, text: str) -> None:
+    def _post_message(self, client: Any, *, channel: str, thread_ts: str, text: str) -> bool:
         try:
             client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=text)
+            return True
         except Exception as exc:
             self._logger.error("Slack message publish failed during explanation: %s", redact_sensitive(exc))
+            return False
 
 
-def build_analysis_request(prepared: PreparedMediaEvidence) -> AnalysisRequest:
+@dataclass(frozen=True)
+class SegmentAnalysisSuccess:
+    interval: SegmentInterval
+    result: AnalysisResult
+
+
+@dataclass(frozen=True)
+class SegmentAnalysisUnavailable:
+    interval: SegmentInterval
+    detail: str
+
+
+SegmentAnalysisOutcome = SegmentAnalysisSuccess | SegmentAnalysisUnavailable
+
+
+def analyze_video_segments(
+    *,
+    prepared: PreparedMediaEvidence,
+    analyzer: ClaudeAnalyzer,
+) -> tuple[SegmentAnalysisOutcome, ...]:
+    intervals = plan_segment_intervals(prepared.metadata.duration_seconds)
+    outcomes: list[SegmentAnalysisOutcome] = []
+
+    for interval in intervals:
+        try:
+            segment = extract_segment_frames(
+                prepared.source_path,
+                workspace=prepared.workspace,
+                interval=interval,
+            )
+            request = build_analysis_request(segment)
+            result = analyzer.analyze(request)
+        except (AnalysisTimeoutError, AnalysisBudgetError, AnalysisProviderError, AnalysisInvalidResponseError):
+            outcomes.append(
+                SegmentAnalysisUnavailable(
+                    interval=interval,
+                    detail="Analysis was unavailable for this interval.",
+                )
+            )
+            continue
+        except MediaExtractionError:
+            if not outcomes:
+                raise
+            outcomes.append(
+                SegmentAnalysisUnavailable(
+                    interval=interval,
+                    detail="Frames were unavailable for this interval.",
+                )
+            )
+            continue
+        outcomes.append(SegmentAnalysisSuccess(interval=interval, result=result))
+
+    if not any(isinstance(outcome, SegmentAnalysisSuccess) for outcome in outcomes):
+        raise AnalysisProviderError("No interval produced a valid analysis result.")
+    return tuple(outcomes)
+
+
+def build_analysis_request(prepared: PreparedSegmentEvidence) -> AnalysisRequest:
     frames = tuple(
         _frame_evidence(frame.path, frame.label, frame.timestamp_seconds)
         for frame in prepared.frames
@@ -146,14 +214,11 @@ def build_analysis_request(prepared: PreparedMediaEvidence) -> AnalysisRequest:
 
     return AnalysisRequest(
         user_request=(
-            "Explain this video in English with a short summary, key points, and timestamps only when the evidence supports them."
+            "Explain this video interval in English with a short summary, key points, and timestamps only when the evidence supports them. "
+            f"This interval covers {_format_seconds(prepared.interval.start_seconds)} to {_format_seconds(prepared.interval.end_seconds)}."
         ),
         frames=frames,
-        transcript=(
-            TranscriptEvidence(text=prepared.audio_evidence.transcript_text)
-            if prepared.audio_evidence.transcript_text
-            else None
-        ),
+        transcript=None,
     )
 
 
@@ -167,31 +232,63 @@ def _frame_evidence(path: Path, label: str, timestamp_seconds: float | None) -> 
     )
 
 
-def render_explanation_reply(*, result: AnalysisResult, audio_evidence: AudioEvidence) -> str:
+def render_explanation_replies(
+    *, interval_results: tuple[SegmentAnalysisOutcome, ...], audio_evidence: AudioEvidence
+) -> tuple[str, ...]:
+    section_texts = [render_interval_section(outcome) for outcome in interval_results]
+    if audio_evidence.detail:
+        section_texts.append(f"Evidence note: {_render_audio_evidence_note(audio_evidence)}")
+
+    messages: list[str] = []
+    current_sections: list[str] = []
+    max_message_chars = 3500
+    for section in section_texts:
+        candidate = "\n\n".join([*current_sections, section])
+        if current_sections and len(candidate) > max_message_chars:
+            messages.append("\n\n".join(current_sections))
+            current_sections = [section]
+        else:
+            current_sections.append(section)
+
+    if current_sections:
+        messages.append("\n\n".join(current_sections))
+    return tuple(messages)
+
+
+def render_interval_section(outcome: SegmentAnalysisOutcome) -> str:
+    header = (
+        f"Interval {_format_seconds(outcome.interval.start_seconds)} to "
+        f"{_format_seconds(outcome.interval.end_seconds)}"
+    )
+    if isinstance(outcome, SegmentAnalysisUnavailable):
+        return f"{header}\nUnavailable: {outcome.detail}"
+
+    result = outcome.result
     lines = [
-        "Summary:",
-        result.summary,
-        "",
+        header,
+        f"Summary: {result.summary}",
         "Key points:",
         *[f"- {item}" for item in result.key_points],
     ]
-
     if result.timestamps_available and result.timestamps:
-        lines.extend(["", "Timestamps:"])
+        lines.append("Supported timestamps:")
         for item in result.timestamps:
-            if item.end_seconds is None:
-                lines.append(f"- {_format_seconds(item.start_seconds)} — {item.label}")
-            else:
-                lines.append(
-                    f"- {_format_seconds(item.start_seconds)} to {_format_seconds(item.end_seconds)} — {item.label}"
-                )
+            lines.append(f"- {_format_timestamp(item)} — {item.label}")
     else:
-        lines.extend(["", "Timestamps were unavailable from the available evidence."])
-
-    if audio_evidence.detail:
-        lines.extend(["", f"Evidence note: {audio_evidence.detail}"])
-
+        lines.append("Supported timestamps were unavailable for this interval.")
     return "\n".join(lines)
+
+
+def _render_audio_evidence_note(audio_evidence: AudioEvidence) -> str:
+    if audio_evidence.transcript_text:
+        return "This explanation used sampled video frames for each interval. Transcript evidence was not reused across segments."
+    return audio_evidence.detail
+
+
+def _format_timestamp(item: AnalysisTimestamp) -> str:
+    if item.end_seconds is None:
+        return _format_seconds(item.start_seconds)
+    return f"{_format_seconds(item.start_seconds)} to {_format_seconds(item.end_seconds)}"
 
 
 def _format_seconds(value: float) -> str:
@@ -212,8 +309,6 @@ def failure_message_for_exception(exc: Exception) -> str:
         return str(exc)
     if isinstance(exc, MediaProbeError):
         return "I couldn't inspect this MP4 safely with FFprobe, so the explanation could not continue."
-    if isinstance(exc, TranscriptionFailureError):
-        return "I couldn't prepare transcript evidence safely, so the explanation could not continue."
     if isinstance(exc, MediaExtractionError):
         return "I couldn't prepare media evidence safely with FFmpeg, so the explanation could not continue."
     if isinstance(exc, AnalysisTimeoutError):
