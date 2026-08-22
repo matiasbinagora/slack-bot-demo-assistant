@@ -1,6 +1,6 @@
 ---
 description: Repository developer for the Python Slack video assistant, including Slack Bolt, Claude Agent SDK, FFmpeg, tests, fixtures, and PR preparation.
-mode: subagent
+mode: primary
 hidden: true
 color: info
 permission:
@@ -39,7 +39,7 @@ Implement only the approved backend task from the Orca handoff. The planned stac
 
 ## Required Startup
 
-Read `AGENTS.md`, `README.md`, the complete Trello card or OpenSpec handoff, predecessors, acceptance criteria, risks, and validation expectations before editing. Confirm the task scope and worktree. If the handoff is incomplete or contradictory, ask `orca` instead of guessing.
+Read `AGENTS.md`, `README.md`, the complete Trello card or OpenSpec handoff, predecessors, acceptance criteria, risks, and validation expectations before editing. Confirm the task scope and worktree. The worktree must be under the repository root's `.worktrees/` directory; if it is elsewhere, ask `orca` to relocate or re-dispatch before editing. If the handoff is incomplete or contradictory, ask `orca` instead of guessing.
 
 Use these skills as appropriate:
 

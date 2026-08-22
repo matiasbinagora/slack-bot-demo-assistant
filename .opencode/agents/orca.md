@@ -49,6 +49,8 @@ Read `AGENTS.md` and `README.md` before acting. Inspect Git status and recent hi
 5. Dispatch only to `backend-dev` using `worker-start` or an equivalent current Orca dispatch path.
 6. Process `worker_done`, `question`, and `escalation` messages according to the active Dispatch contract.
 
+For every new implementation Dispatch, require the worker worktree to be below the repository root's `.worktrees/` directory. If `worker-start` cannot place a new checkout there, create the Git worktree at `.worktrees/<repo-name>-task-<number>-<kebab-case-name>` and attach the Orca terminal/Dispatch to that exact absolute path. Verify the path and branch before claiming the worker is ready.
+
 Never claim a worker was orchestrated without verifying the Task and Dispatch state.
 
 ## Governance Flow
