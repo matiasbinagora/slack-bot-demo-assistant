@@ -80,24 +80,26 @@ Rules:
 
 ## Worktree Naming
 
-Use this path format when practical:
+Use this repository-local path format:
 
 ```text
-../{repo-name}-task-{number}-{kebab-case-name}
+.worktrees/{repo-name}-task-{number}-{kebab-case-name}
 ```
 
 Example:
 
 ```text
-../meetscribe-flow-task-007-add-ordered-history-screen-for-verification
+.worktrees/meetscribe-flow-task-007-add-ordered-history-screen-for-verification
 ```
 
 Rules:
 
+- `.worktrees/` is the required root for all new task worktrees in this repository.
 - Use one worktree per implementation task.
 - Reuse an existing task worktree only if it belongs to the same task and branch.
 - Do not share one worktree across unrelated tasks.
 - Do not edit implementation files in the original project root after creating or identifying the task worktree.
+- Do not create new task worktrees in a sibling directory, an Orca-global workspace directory, or an arbitrary temporary path.
 - Report the worktree path in every developer handoff.
 
 ## Required Setup Order
@@ -112,7 +114,7 @@ Before editing code:
 6. Fetch remote refs.
 7. Sync the base branch.
 8. Create or reuse the task worktree.
-9. Confirm the feature branch is active inside the worktree.
+9. Confirm the feature branch is active inside the worktree and the absolute path is below `<repo-root>/.worktrees/`.
 10. Update Trello status when Trello is used.
 11. Report setup details before coding.
 
@@ -135,13 +137,15 @@ git switch main
 git pull --ff-only origin main
 ```
 
-Create the task worktree and branch:
+Create the task worktree and branch inside the repository:
 
 ```bash
-git worktree add ../meetscribe-flow-task-007-add-ordered-history-screen-for-verification -b feature/task-007-add-ordered-history-screen-for-verification main
+git worktree add .worktrees/meetscribe-flow-task-007-add-ordered-history-screen-for-verification -b feature/task-007-add-ordered-history-screen-for-verification main
 ```
 
 Then run all implementation commands from the new worktree path.
+
+When Orca is supervising the task, bind the worker terminal to the exact absolute path returned by `git worktree list --porcelain`. If `orca worktree create` cannot place a checkout under `.worktrees/`, use `git worktree add` as above and then attach the Orca terminal/Dispatch with the path selector. The worker must not be dispatched into the default Orca workspace directory.
 
 ## Existing Worktree Reuse
 

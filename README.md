@@ -60,6 +60,18 @@ orca review gates
 
 `orca` can create or update Trello cards and comment on GitHub pull requests. It must request human approval before merging a PR, closing a card, changing credentials, or expanding the approved scope.
 
+## Worktree Policy
+
+All new task worktrees are repository-local and must be created under `.worktrees/`:
+
+```text
+.worktrees/<repo-name>-task-<number>-<kebab-case-name>
+```
+
+The directory is ignored by Git. Keep each task on its own feature branch and verify the path with `git worktree list --porcelain` before coding or dispatching. When Orca cannot create a worktree at that path directly, create it with `git worktree add` and attach the agent terminal to the exact repository-local path; do not use a sibling or global worktree as a substitute.
+
+Each worktree needs its own local ignored `.env.mcp` copy before Trello or GitHub mutations. Never commit credentials, video content, transcripts, frames, or private URLs.
+
 ## Repository Agents
 
 ### `orca`

@@ -35,6 +35,15 @@ This bootstrap phase creates repository agents and documentation. It does not im
 - Ask before installing packages, changing secrets, changing infrastructure, or expanding scope.
 - Send `worker_done` only when an active Orca Dispatch preamble requires it.
 
+## Worktree Policy
+
+- All implementation worktrees must live inside the repository-local `.worktrees/` directory.
+- Use the naming pattern `.worktrees/<repo-name>-task-<number>-<kebab-case-name>` and keep one worktree per task/branch.
+- `.worktrees/` is ignored by Git; do not put secrets, credentials, or private media in it.
+- Before dispatching, verify the absolute path and branch with `git worktree list --porcelain`. A worktree outside `.worktrees/` is not compliant for new work.
+- If the Orca worktree creation command cannot target this repository-local directory, create the Git worktree under `.worktrees/` first and attach the Orca terminal/Dispatch to that exact path. Do not silently fall back to an Orca-managed checkout elsewhere.
+- Each worktree must receive its own ignored `.env.mcp` copy before Trello or GitHub mutations are attempted; never copy secret values into tracked files or prompts.
+
 ## Product Contract
 
 - Runtime target: OpenCode coordinated by Orca.
