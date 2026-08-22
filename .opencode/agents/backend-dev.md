@@ -41,6 +41,15 @@ Implement only the approved backend task from the Orca handoff. The planned stac
 
 Read `AGENTS.md`, `README.md`, the complete Trello card or OpenSpec handoff, predecessors, acceptance criteria, risks, and validation expectations before editing. Confirm the task scope and worktree. The worktree must be under the repository root's `.worktrees/` directory; if it is elsewhere, ask `orca` to relocate or re-dispatch before editing. If the handoff is incomplete or contradictory, ask `orca` instead of guessing.
 
+Before searching or reading application source, follow the repository's graph-first context policy:
+
+1. Verify that the active worktree has a fresh `graphify-out/graph.json` and that its Codebase Memory index targets the same absolute worktree.
+2. Query Graphify for the task's relevant components, communities, entry points, or architectural path.
+3. Query Codebase Memory for exact definitions, callers/callees, data flow, and impact; retrieve targeted snippets only after finding the qualified symbol.
+4. Use broad `grep`, `glob`, or full-file reads only when the graph results show that they are needed or when the handoff explicitly requires them.
+
+If either graph source is unavailable or points at another checkout, stop and ask `orca` for a refresh. Do not install a package, rebuild another worktree's graph, or silently fall back to an unbounded repository scan.
+
 Use these skills as appropriate:
 
 - `git-feature-workflow`
@@ -73,6 +82,12 @@ Use TDD at agreed public seams. Prefer mocks for Slack and Claude, deterministic
 - commands run and results;
 - PR URL when created;
 - remaining risks or skipped checks.
+
+The completion report must also include:
+
+- Graphify graph path, node/edge counts, refresh command/result, and the scoped graph questions used;
+- Codebase Memory project name, exact worktree root, index status/node-edge counts, and the search/trace symbols used;
+- the files or exact snippets opened after graph selection.
 
 If Orca injected a live Dispatch preamble, follow its exact lifecycle instructions and send `worker_done` once with an explicit outcome. Do not create a second dispatch or run a generic orchestration path.
 

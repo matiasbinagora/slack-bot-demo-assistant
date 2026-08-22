@@ -80,6 +80,17 @@ This bootstrap phase creates repository agents and documentation. It does not im
 7. Use fresh command output as evidence before claiming success.
 8. Archive or sync OpenSpec artifacts only after the review gates pass and the user approves the workflow transition.
 
+## Graph-first context policy
+
+Graphify and `codebase-memory` are mandatory read-only context sources for implementation work. They reduce broad source reads and keep the developer's context focused; they do not replace tests, review, or the required handoff.
+
+- After reading the required governance files, Trello card/OpenSpec handoff, and acceptance criteria, query Graphify for the relevant architecture, communities, and entry points before searching application source.
+- Then use `codebase-memory` for exact symbol lookup, callers/callees, data-flow or impact tracing, and targeted code snippets. Prefer `search_graph`, `trace_path`, and `get_code_snippet` over broad file reads.
+- The graph and index must target the exact active worktree. Never point a task worktree at the root checkout's graph or cache. If `graphify-out/graph.json` or the Codebase Memory index is missing or stale, pause and ask `orca` to refresh the exact worktree before coding.
+- Keep context queries narrow by default: Graphify depth 1–2 with a bounded budget; Codebase Memory search results limited to the relevant symbols, snippets without neighbors first, and traces limited to the required impact depth.
+- Do not place tokens, private URLs, video contents, transcripts, frames, or other sensitive values in graph questions, generated reports, or completion messages.
+- Every `backend-dev` completion report must include the Graphify graph path and refresh evidence, the Codebase Memory project/worktree and index evidence, the scoped queries used, and the files opened after graph selection. Missing graph evidence is a handoff/review blocker.
+
 ## Canonical Skills
 
 Repository agents load skills only from `.opencode/skills`. External `.agents/skills` and `.claude/skills` installations are compatibility caches and must not be treated as the repository source of truth.
@@ -116,3 +127,16 @@ The runtime-managed `orchestration` skill is the exception. It must be loaded fr
 - The MCP configuration may use `.env.mcp`, but every worktree must provide its own local copy before Trello or GitHub mutations are attempted.
 - `codebase-memory` and Graphify are configured for this repository and may be used for read-only indexing and architecture queries. Their cache and generated graph directories are ignored and must never point at another project. Keep `paradigm-memory` disabled unless it is separately configured for this repository.
 - LSP remains disabled until a repository-owned governance server and its dependencies exist.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+When the user types `/graphify`, use the installed graphify skill or instructions before doing anything else.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- Dirty graphify-out/ files are expected after hooks or incremental updates; dirty graph files are not a reason to skip graphify. Only skip graphify if the task is about stale or incorrect graph output, or the user explicitly says not to use it.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

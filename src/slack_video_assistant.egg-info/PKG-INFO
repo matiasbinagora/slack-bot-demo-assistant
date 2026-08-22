@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: slack-video-assistant
+Version: 0.1.0
+Summary: Local-first Slack Video Assistant foundation
+Requires-Python: >=3.10
+Requires-Dist: claude-agent-sdk<0.3,>=0.2.143
+Requires-Dist: slack-bolt<2,>=1.30.0
+Provides-Extra: dev
+Requires-Dist: pytest<10,>=9; extra == "dev"
