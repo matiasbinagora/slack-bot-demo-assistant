@@ -403,7 +403,41 @@ def test_all_segment_failures_post_safe_failure_without_fabricated_partial_outpu
 
     assert len(client.calls) == 1
     assert client.calls[0]["text"] == "Claude couldn't analyze this video successfully, so no explanation was posted. Please try again."
-    prepared.workspace.cleanup(state="success")
+    assert prepared.workspace.root.exists() is False
+
+
+def test_all_interval_timeouts_post_safe_failure_and_clean_workspace(tmp_path: Path, monkeypatch) -> None:
+    prepared = make_prepared_media(tmp_path, duration_seconds=25.0)
+    adapter = FakeAdapter(b"fake-mp4")
+    client = FakeSlackClient()
+    analyzer = SequenceAnalyzer(
+        outcomes=[AnalysisTimeoutError("timeout")] * 3,
+        calls=[],
+    )
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.prepare_media_evidence",
+        lambda **kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.extract_segment_frames",
+        lambda source_path, workspace, interval: make_segment(interval, workspace),
+    )
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: adapter,
+        analyzer_factory=lambda: analyzer,
+        executor=ImmediateExecutor(),
+        logger=logging.getLogger("tests.explanation.timeout_cleanup"),
+        temp_root=tmp_path / "work",
+    )
+
+    orchestrator.enqueue(client=client, session=make_session())
+
+    assert len(client.calls) == 1
+    assert (
+        client.calls[0]["text"]
+        == "Claude couldn't analyze this video successfully, so no explanation was posted. Please try again."
+    )
+    assert prepared.workspace.root.exists() is False
 
 
 def test_frame_extraction_failure_marks_only_that_interval_unavailable(tmp_path: Path, monkeypatch) -> None:
@@ -507,6 +541,55 @@ def test_failure_message_mapping_covers_safe_error_paths() -> None:
 
     for exc, expected in cases:
         assert failure_message_for_exception(exc) == expected
+
+
+def test_success_publish_occurs_before_final_workspace_cleanup(tmp_path: Path, monkeypatch) -> None:
+    prepared = make_prepared_media(tmp_path, duration_seconds=25.0)
+    adapter = FakeAdapter(b"fake-mp4")
+    client = FakeSlackClient()
+    analyzer = SequenceAnalyzer(
+        outcomes=[
+            AnalysisResult(summary="One.", key_points=("P1",), timestamps_available=False, timestamps=()),
+            AnalysisResult(summary="Two.", key_points=("P2",), timestamps_available=False, timestamps=()),
+            AnalysisResult(summary="Three.", key_points=("P3",), timestamps_available=False, timestamps=()),
+        ],
+        calls=[],
+    )
+    call_order: list[str] = []
+    original_cleanup = prepared.workspace.cleanup
+
+    def record_publish(**payload: Any) -> None:
+        call_order.append("publish")
+        FakeSlackClient.chat_postMessage(client, **payload)
+
+    def record_cleanup(*, state: str, logger: logging.Logger | None = None):
+        call_order.append("cleanup")
+        return original_cleanup(state=state, logger=logger)
+
+    monkeypatch.setattr(client, "chat_postMessage", record_publish)
+    monkeypatch.setattr(prepared.workspace, "cleanup", record_cleanup)
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.prepare_media_evidence",
+        lambda **kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.extract_segment_frames",
+        lambda source_path, workspace, interval: make_segment(interval, workspace),
+    )
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: adapter,
+        analyzer_factory=lambda: analyzer,
+        executor=ImmediateExecutor(),
+        logger=logging.getLogger("tests.explanation.publish_before_cleanup"),
+        temp_root=tmp_path / "work",
+    )
+
+    orchestrator.enqueue(client=client, session=make_session())
+
+    assert call_order == ["publish", "cleanup"]
+    assert len(client.calls) == 1
+    assert prepared.workspace.root.exists() is False
+
 
 
 def test_publish_failure_is_logged_and_cleanup_still_runs(tmp_path: Path, monkeypatch, caplog) -> None:

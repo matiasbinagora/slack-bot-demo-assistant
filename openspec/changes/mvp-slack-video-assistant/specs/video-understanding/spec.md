@@ -68,17 +68,22 @@ The pipeline SHALL return an English summary and key points, SHALL include times
 
 ### Requirement: Media retention minimization
 
-The pipeline SHALL delete downloaded videos, extracted frames, transcripts, intermediate audio, and local analysis artifacts after each request completes, fails, or is cancelled.
+The pipeline SHALL delete downloaded videos, extracted frames, transcripts, intermediate audio, and local analysis artifacts after each currently supported explanation terminal state completes: success, Slack publish failure, validation/media/provider failure, or timeout. Active explanation cancellation is not yet part of this capability contract and is tracked separately in the approved `explanation-job-cancellation` / `DAY-8-TASK-015` follow-up. Pending export-confirmation cancellation remains covered by the existing Slack interaction/export contract.
 
 #### Scenario: Successful cleanup
 
 - **WHEN** a valid explanation has been rendered in Slack
 - **THEN** all local source and derived media for that request are deleted while the thread message remains the only user-facing record produced by the app
 
-#### Scenario: Cleanup is attempted after every terminal state
+#### Scenario: Cleanup is attempted after every currently supported explanation terminal state
 
-- **WHEN** a request exits through success, validation failure, provider failure, cancellation, or timeout
+- **WHEN** a request exits through success, Slack publish failure, validation failure, media/provider failure, or timeout
 - **THEN** cleanup is attempted and any cleanup failure is recorded as an operational risk without logging media contents
+
+#### Scenario: Active explanation cancellation is deferred to the approved follow-up
+
+- **WHEN** readers review this capability for cleanup semantics during an in-flight explanation
+- **THEN** they are directed to `explanation-job-cancellation` / `DAY-8-TASK-015`, while the current contract continues to preserve only the already-supported pending-export cancellation behavior outside this capability
 
 ### Requirement: Video understanding uses repository fixtures
 
