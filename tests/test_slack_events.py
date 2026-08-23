@@ -348,6 +348,7 @@ def test_message_commands_transition_state_and_handle_duplicates_safely() -> Non
         ack=lambda: None,
         client=client,
     )
+    assert export_executor.requests == []
     handler.handle_message(
         body={
             "event_id": "Ev4",
@@ -378,6 +379,31 @@ def test_message_commands_transition_state_and_handle_duplicates_safely() -> Non
             client,
             ExportRequest(key=key, file_id="F1", target_ratio="16:9"),
         )
+    ]
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.CONFIRMATION_CONSUMED
+
+
+def test_confirm_without_export_executor_reports_saved_confirmation_without_handoff_claim() -> None:
+    handler, store = make_handler()
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-confirm-no-executor",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "confirm"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert [payload[1]["text"] for payload in client.calls if payload[0] == "chat_postMessage"] == [
+        "Confirmation recorded. The approved 16:9 centered-crop export request is saved for this thread.",
     ]
     session = store.get(key)
     assert session is not None

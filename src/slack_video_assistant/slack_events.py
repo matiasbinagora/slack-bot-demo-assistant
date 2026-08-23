@@ -207,6 +207,13 @@ class SlackEventHandler:
                     text="I recorded your confirmation, but I couldn't hand the export request to the next step safely.",
                 )
                 return
+            self._post_message(
+                client,
+                channel=context.channel_id,
+                thread_ts=context.thread_ts,
+                text=_message_for_executor_handoff(result),
+            )
+            return
 
         self._post_message(
             client,
@@ -402,10 +409,7 @@ def _message_for_transition(command: CanonicalCommand, result: TransitionResult)
     if command is CanonicalCommand.CONFIRM:
         if result.reason == "confirmation_consumed":
             ratio = result.export_request.target_ratio if result.export_request is not None else "16:9"
-            return (
-                f"Confirmation recorded. I handed the approved {ratio} centered-crop export request "
-                "to the next execution step."
-            )
+            return f"Confirmation recorded. The approved {ratio} centered-crop export request is saved for this thread."
         return "There is no pending export to confirm in this thread."
 
     if result.reason == "explanation_cancelled":
@@ -417,3 +421,11 @@ def _message_for_transition(command: CanonicalCommand, result: TransitionResult)
     if result.reason == "cancellation_consumed":
         return "Export request cancelled for this thread."
     return "There is no active explanation or pending export to cancel in this thread."
+
+
+def _message_for_executor_handoff(result: TransitionResult) -> str:
+    ratio = result.export_request.target_ratio if result.export_request is not None else "16:9"
+    return (
+        f"Confirmation recorded. I handed the approved {ratio} centered-crop export request "
+        "to the next execution step."
+    )
