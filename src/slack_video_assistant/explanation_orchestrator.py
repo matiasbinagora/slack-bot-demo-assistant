@@ -103,6 +103,7 @@ class ExplanationOrchestrator:
                 max_duration_seconds=self._max_video_duration_seconds,
                 extract_representative_frames=False,
                 transcriber=self._transcriber,
+                logger=self._logger,
             )
             workspace = prepared.workspace
             analyzer = self._analyzer_factory()

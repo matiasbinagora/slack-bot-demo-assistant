@@ -288,6 +288,35 @@ def test_prepare_media_evidence_cleans_workspace_after_frame_extraction_failure(
     assert list(workspaces_root.iterdir()) == []
 
 
+def test_prepare_media_evidence_logs_redacted_cleanup_failure_on_terminal_error(
+    monkeypatch, tmp_path: Path, caplog
+) -> None:
+    source_fixture = build_mp4_fixture(tmp_path, name="valid-cleanup-log", with_audio=True, duration_seconds=2)
+    workspaces_root = tmp_path / "workspaces"
+    workspaces_root.mkdir()
+    logger = logging.getLogger("tests.media_pipeline.prepare_cleanup")
+
+    def fail_rmtree(path: Path) -> None:
+        raise RuntimeError(f"could not remove {path}")
+
+    monkeypatch.setattr("slack_video_assistant.media_pipeline.shutil.rmtree", fail_rmtree)
+
+    with caplog.at_level(logging.WARNING, logger="tests.media_pipeline.prepare_cleanup"):
+        with pytest.raises(MediaExtractionError, match="FFmpeg is unavailable in this environment."):
+            prepare_media_evidence(
+                byte_stream=[source_fixture.read_bytes()],
+                request_id="frame-failure-log",
+                untrusted_filename="clip.mp4",
+                temp_root=workspaces_root,
+                ffmpeg_command="ffmpeg-does-not-exist",
+                logger=logger,
+            )
+
+    assert "Workspace cleanup failed for terminal state `failure`" in caplog.text
+    assert str(workspaces_root) not in caplog.text
+    assert "[REDACTED_PATH]" in caplog.text
+
+
 def test_build_audio_evidence_marks_missing_audio_as_unavailable(tmp_path: Path) -> None:
     source_fixture = build_mp4_fixture(tmp_path, name="valid-no-audio", with_audio=False, duration_seconds=1)
     workspace = MediaWorkspace.create(temp_root=tmp_path, request_id="no-audio")
@@ -358,7 +387,7 @@ def test_build_audio_evidence_handles_transcriber_failure_without_retaining_tran
         ("success", "completed"),
         ("validation_failure", "completed"),
         ("provider_failure", "completed"),
-        ("cancelled", "completed"),
+        ("publish_failure", "completed"),
         ("timeout", "completed"),
     ],
 )
@@ -375,6 +404,22 @@ def test_workspace_cleanup_runs_for_all_terminal_states(
     assert result.state == state
     assert result.succeeded is True
     assert expected_phrase in result.detail
+    assert workspace.root.exists() is False
+
+
+def test_workspace_cleanup_is_idempotent_after_first_success(tmp_path: Path) -> None:
+    workspace = MediaWorkspace.create(temp_root=tmp_path, request_id="idempotent-cleanup")
+    workspace.controlled_path("frames/placeholder.txt").parent.mkdir(parents=True, exist_ok=True)
+    workspace.controlled_path("frames/placeholder.txt").write_text("frame", encoding="utf-8")
+
+    first_result = workspace.cleanup(state="success")
+    second_result = workspace.cleanup(state="success")
+
+    assert first_result.attempted is True
+    assert first_result.succeeded is True
+    assert second_result.attempted is True
+    assert second_result.succeeded is True
+    assert second_result.detail == "Workspace cleanup was already complete for terminal state `success`."
     assert workspace.root.exists() is False
 
 

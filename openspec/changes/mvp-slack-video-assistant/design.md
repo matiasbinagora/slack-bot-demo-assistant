@@ -34,7 +34,7 @@ El proceso usará Slack Bolt con Socket Mode. `SLACK_BOT_TOKEN` y `SLACK_APP_TOK
 
 Los handlers harán acknowledge inmediato y publicarán un estado breve en el thread. El procesamiento pesado se ejecutará fuera del callback mediante una unidad asíncrona o worker local acotado. El estado de una sesión se identificará por workspace, channel y thread timestamp, y vivirá solo durante el ciclo de la solicitud.
 
-El flujo inicial será explícito y testeable: una subida MP4 recibe acuse, `explain` o una solicitud equivalente dispara la explicación, `export` inicia la sugerencia y `confirm`/`cancel` resuelven la confirmación. No se generará un resumen automático al subir el archivo.
+El flujo inicial será explícito y testeable: una subida MP4 recibe acuse, `explain` o una solicitud equivalente dispara la explicación, `export` inicia la sugerencia y `confirm`/`cancel` resuelven únicamente la confirmación pendiente de exportación. No se generará un resumen automático al subir el archivo, y la cancelación de una explicación activa queda fuera de este MVP hasta el follow-up aprobado `explanation-job-cancellation` / `DAY-8-TASK-015`.
 
 **Alternativas consideradas:** procesar dentro del callback sería simple pero puede bloquear el Socket Mode y provocar reintentos; una cola externa añade infraestructura y persistencia que no son necesarias para desarrollo local.
 
@@ -51,7 +51,7 @@ En tests se mockeará la interfaz; no se harán llamadas reales a Claude. Los er
 
 ### 5. Pipeline temporal de medios
 
-Cada solicitud tendrá un directorio temporal privado. La descarga aplicará límite de bytes durante el streaming; FFprobe validará contenedor, codec/duración y dimensiones antes de continuar. FFmpeg generará frames, audio y el output de exportación dentro de ese directorio. Un bloque de cleanup se ejecutará después de éxito, error o cancelación.
+Cada solicitud tendrá un directorio temporal privado. La descarga aplicará límite de bytes durante el streaming; FFprobe validará contenedor, codec/duración y dimensiones antes de continuar. FFmpeg generará frames, audio y el output de exportación dentro de ese directorio. Un bloque de cleanup se ejecutará después de cada estado terminal actualmente soportado del flujo de explicación: éxito, fallo de publicación en Slack, fallo de validación/media/provider y timeout. La cancelación ya soportada para exportación pendiente conserva su comportamiento de comando/estado actual, pero no amplía este contrato para cancelar una explicación activa; esa semántica queda diferida al follow-up aprobado `explanation-job-cancellation` / `DAY-8-TASK-015`.
 
 **Alternativas consideradas:** almacenamiento permanente simplificaría reintentos, pero contradice la política de retención mínima; una base de datos de sesiones añadiría un sistema que el MVP no necesita.
 
@@ -74,7 +74,7 @@ Si la implementación aprobada cambia comportamiento observable, dependencias op
 - **[Contenido no confiable]** → Validar archivos con streaming y FFprobe, usar rutas temporales controladas y separar contenido de instrucciones del sistema.
 - **[Fuga de secretos o URLs]** → Leer credenciales solo del entorno, redactar logs y añadir revisión de seguridad.
 - **[Diferencia entre mocks y servicios reales]** → Marcar explícitamente la cobertura simulada y no afirmar QA live Slack.
-- **[Cleanup prematuro o incompleto]** → Publicar/validar el resultado antes de borrar y probar cleanup en éxito, error y cancelación.
+- **[Cleanup prematuro o incompleto]** → Publicar/validar el resultado antes de borrar y probar cleanup en los estados terminales hoy soportados; no inferir cancelación de explicación activa antes de `explanation-job-cancellation` / `DAY-8-TASK-015`.
 - **[Estado de confirmación ambiguo]** → Usar estados explícitos por thread, comandos canónicos (`export`, `confirm`, `cancel`) y pruebas de repetición/out-of-order.
 - **[Contrato OpenSpec desactualizado]** → Exigir actualización del artefacto relevante en la misma PR cuando cambie el comportamiento implementado.
 

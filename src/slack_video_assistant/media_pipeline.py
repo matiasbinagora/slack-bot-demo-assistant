@@ -205,6 +205,7 @@ def prepare_media_evidence(
     ffprobe_command: str = "ffprobe",
     ffmpeg_command: str = "ffmpeg",
     transcriber: AudioTranscriber | None = None,
+    logger: logging.Logger | None = None,
 ) -> PreparedMediaEvidence:
     del untrusted_filename
     workspace = MediaWorkspace.create(temp_root=temp_root, request_id=request_id)
@@ -242,7 +243,7 @@ def prepare_media_evidence(
             audio_evidence=audio_evidence,
         )
     except Exception:
-        workspace.cleanup(state="failure")
+        workspace.cleanup(state="failure", logger=logger)
         raise
 
 
