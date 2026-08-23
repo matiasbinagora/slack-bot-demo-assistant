@@ -303,6 +303,26 @@ def test_request_cancel_is_idempotent_and_scoped_to_matching_session(tmp_path: P
     assert orchestrator.request_cancel(session.key) == "already_requested"
 
 
+def test_publication_checkpoint_resolves_cancel_before_publish_atomically() -> None:
+    handle = ExplanationJobHandle()
+
+    assert handle.request_cancel() == "accepted"
+    assert handle.start_publication() is False
+    assert handle.terminal_outcome() == "cancelled"
+    assert handle.try_claim_cancelled() is False
+    assert handle.try_claim_terminal("success") is False
+
+
+def test_publication_checkpoint_blocks_late_cancel_from_claiming_cancelled() -> None:
+    handle = ExplanationJobHandle()
+
+    assert handle.start_publication() is True
+    assert handle.request_cancel() == "publication_started"
+    assert handle.try_claim_cancelled() is False
+    assert handle.try_claim_terminal("success") is True
+    assert handle.terminal_outcome() == "success"
+
+
 def test_cancellation_between_segments_prevents_publish_and_cleans_once(tmp_path: Path, monkeypatch) -> None:
     prepared = make_prepared_media(tmp_path, duration_seconds=25.0)
     adapter = FakeAdapter(b"fake-mp4")

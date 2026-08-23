@@ -75,9 +75,22 @@ class ExplanationJobHandle:
             self.cancel_event.set()
             return "accepted"
 
-    def mark_publication_started(self) -> None:
+    def start_publication(self) -> bool:
         with self._lock:
+            if self._terminal_outcome is not None:
+                return False
+            if self.cancel_event.is_set():
+                self._terminal_outcome = "cancelled"
+                return False
             self._publication_started = True
+            return True
+
+    def try_claim_cancelled(self) -> bool:
+        with self._lock:
+            if not self.cancel_event.is_set() or self._publication_started or self._terminal_outcome is not None:
+                return False
+            self._terminal_outcome = "cancelled"
+            return True
 
     def try_claim_terminal(self, outcome: str) -> bool:
         with self._lock:
@@ -187,8 +200,8 @@ class ExplanationOrchestrator:
                 interval_results=interval_results,
                 audio_evidence=prepared.audio_evidence,
             )
-            if messages:
-                handle.mark_publication_started()
+            if messages and not handle.start_publication():
+                raise ExplanationCancelled()
             publish_succeeded = True
             for message in messages:
                 publish_succeeded = (
@@ -235,9 +248,8 @@ class ExplanationOrchestrator:
                 self._jobs.pop(key, None)
 
     def _raise_if_cancelled(self, handle: ExplanationJobHandle) -> None:
-        if not handle.cancel_event.is_set():
+        if not handle.try_claim_cancelled():
             return
-        handle.try_claim_terminal("cancelled")
         raise ExplanationCancelled()
 
     def _post_message(self, client: Any, *, channel: str, thread_ts: str, text: str) -> bool:
