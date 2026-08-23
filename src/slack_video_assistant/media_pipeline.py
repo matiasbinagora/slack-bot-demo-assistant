@@ -26,6 +26,7 @@ SHORT_VIDEO_SEGMENT_SECONDS = 10.0
 LONG_VIDEO_SEGMENT_SECONDS = 30.0
 SHORT_VIDEO_SEGMENT_THRESHOLD_SECONDS = 30.0
 MAX_SEGMENTS = 10
+APPROVED_EXPORT_RATIOS = ("16:9", "9:16", "1:1")
 
 
 class MediaPipelineError(RuntimeError):
@@ -109,6 +110,15 @@ class PreparedMediaEvidence:
     metadata: VideoMetadata
     frames: tuple[ExtractedFrame, ...]
     audio_evidence: AudioEvidence
+
+
+@dataclass(frozen=True)
+class ExportedVideo:
+    output_path: Path
+    metadata: VideoMetadata
+    target_ratio: str
+    expected_width: int
+    expected_height: int
 
 
 @dataclass(frozen=True)
@@ -539,6 +549,71 @@ def build_audio_evidence(
     )
 
 
+def export_video(
+    *,
+    source_path: Path,
+    workspace: MediaWorkspace,
+    target_ratio: str,
+    ffprobe_command: str = "ffprobe",
+    ffmpeg_command: str = "ffmpeg",
+) -> ExportedVideo:
+    source_metadata = probe_video(source_path, ffprobe_command=ffprobe_command)
+    expected_width, expected_height, offset_x, offset_y = _centered_crop_geometry(
+        width=source_metadata.width,
+        height=source_metadata.height,
+        target_ratio=target_ratio,
+    )
+    output_path = workspace.controlled_path(f"exports/{target_ratio.replace(':', 'x')}.mp4")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _run_ffmpeg(
+        _export_ffmpeg_command(
+            source_path=source_path,
+            output_path=output_path,
+            target_ratio=target_ratio,
+            crop_width=expected_width,
+            crop_height=expected_height,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            has_audio=source_metadata.has_audio,
+            ffmpeg_command=ffmpeg_command,
+        ),
+        failure_message="FFmpeg could not generate the requested export safely.",
+    )
+    metadata = validate_exported_video(
+        output_path,
+        target_ratio=target_ratio,
+        expected_width=expected_width,
+        expected_height=expected_height,
+        ffprobe_command=ffprobe_command,
+    )
+    return ExportedVideo(
+        output_path=output_path,
+        metadata=metadata,
+        target_ratio=target_ratio,
+        expected_width=expected_width,
+        expected_height=expected_height,
+    )
+
+
+def validate_exported_video(
+    output_path: Path,
+    *,
+    target_ratio: str,
+    expected_width: int,
+    expected_height: int,
+    ffprobe_command: str = "ffprobe",
+) -> VideoMetadata:
+    _require_supported_export_ratio(target_ratio)
+    metadata = probe_video(output_path, ffprobe_command=ffprobe_command)
+    if metadata.video_codec != "h264":
+        raise MediaValidationError("The export did not produce an H.264 video stream.")
+    if metadata.audio_codec != "aac":
+        raise MediaValidationError("The export did not produce an AAC audio stream.")
+    if metadata.width != expected_width or metadata.height != expected_height:
+        raise MediaValidationError("The export dimensions did not match the approved centered crop.")
+    return metadata
+
+
 def _run_ffprobe(source_path: Path, *, ffprobe_command: str) -> Mapping[str, object]:
     try:
         result = subprocess.run(
@@ -587,6 +662,63 @@ def _run_ffmpeg(command: Sequence[str], *, failure_message: str) -> None:
         raise MediaExtractionError(failure_message)
 
 
+def _export_ffmpeg_command(
+    *,
+    source_path: Path,
+    output_path: Path,
+    target_ratio: str,
+    crop_width: int,
+    crop_height: int,
+    offset_x: int,
+    offset_y: int,
+    has_audio: bool,
+    ffmpeg_command: str,
+) -> list[str]:
+    _require_supported_export_ratio(target_ratio)
+    command = [
+        ffmpeg_command,
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source_path),
+    ]
+    if not has_audio:
+        command.extend(
+            [
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ]
+        )
+
+    command.extend(
+        [
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a:0" if has_audio else "1:a:0",
+            "-vf",
+            f"crop={crop_width}:{crop_height}:{offset_x}:{offset_y}",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "ultrafast",
+            "-movflags",
+            "+faststart",
+            "-c:a",
+            "aac",
+        ]
+    )
+    if not has_audio:
+        command.append("-shortest")
+    command.append(str(output_path))
+    return command
+
+
 def _is_valid_mp4_container(
     container_names: Sequence[str], format_payload: Mapping[str, object]
 ) -> bool:
@@ -599,6 +731,32 @@ def _is_valid_mp4_container(
         if major_brand in {"isom", "iso2", "mp41", "mp42", "avc1"}:
             return True
     return False
+
+
+def _centered_crop_geometry(*, width: int, height: int, target_ratio: str) -> tuple[int, int, int, int]:
+    ratio_width, ratio_height = _ratio_components(target_ratio)
+    even_multiplier = 2 if (ratio_width % 2 or ratio_height % 2) else 1
+    unit_width = ratio_width * even_multiplier
+    unit_height = ratio_height * even_multiplier
+    scale = min(width // unit_width, height // unit_height)
+    if scale < 1:
+        raise MediaValidationError("This MP4 is too small for the requested centered crop export.")
+    crop_width = unit_width * scale
+    crop_height = unit_height * scale
+    offset_x = max((width - crop_width) // 2, 0)
+    offset_y = max((height - crop_height) // 2, 0)
+    return crop_width, crop_height, offset_x, offset_y
+
+
+def _ratio_components(target_ratio: str) -> tuple[int, int]:
+    _require_supported_export_ratio(target_ratio)
+    width_text, height_text = target_ratio.split(":", maxsplit=1)
+    return int(width_text), int(height_text)
+
+
+def _require_supported_export_ratio(target_ratio: str) -> None:
+    if target_ratio not in APPROVED_EXPORT_RATIOS:
+        raise MediaValidationError("This export ratio is not supported for the MVP.")
 
 
 def _int_field(stream: Mapping[str, object], key: str, *, message: str) -> int:
