@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -34,7 +34,7 @@ from slack_video_assistant.media_pipeline import (
     plan_segment_intervals,
     prepare_media_evidence,
 )
-from slack_video_assistant.session_store import ThreadSession
+from slack_video_assistant.session_store import SessionKey, ThreadSession
 from slack_video_assistant.slack_file_adapter import SlackAdapterError, SlackFileAdapter
 
 
@@ -51,6 +51,61 @@ class ExplanationContext:
     team_id: str
     channel_id: str
     thread_ts: str
+
+
+class ExplanationCancelled(Exception):
+    """Raised when an explanation job observes a cooperative cancellation request."""
+
+
+@dataclass
+class ExplanationJobHandle:
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _publication_started: bool = field(default=False, init=False, repr=False)
+    _terminal_outcome: str | None = field(default=None, init=False, repr=False)
+
+    def request_cancel(self) -> str:
+        with self._lock:
+            if self._terminal_outcome is not None:
+                return "terminal"
+            if self._publication_started:
+                return "publication_started"
+            if self.cancel_event.is_set():
+                return "already_requested"
+            self.cancel_event.set()
+            return "accepted"
+
+    def start_publication(self) -> bool:
+        with self._lock:
+            if self._terminal_outcome is not None:
+                return False
+            if self.cancel_event.is_set():
+                self._terminal_outcome = "cancelled"
+                return False
+            self._publication_started = True
+            return True
+
+    def try_claim_cancelled(self) -> bool:
+        with self._lock:
+            if not self.cancel_event.is_set() or self._publication_started or self._terminal_outcome is not None:
+                return False
+            self._terminal_outcome = "cancelled"
+            return True
+
+    def try_claim_terminal(self, outcome: str) -> bool:
+        with self._lock:
+            if self._terminal_outcome is not None:
+                return False
+            self._terminal_outcome = outcome
+            return True
+
+    def terminal_outcome(self) -> str | None:
+        with self._lock:
+            return self._terminal_outcome
+
+    def is_active(self) -> bool:
+        with self._lock:
+            return self._terminal_outcome is None
 
 
 class LocalThreadExecutor:
@@ -79,6 +134,8 @@ class ExplanationOrchestrator:
         self._max_video_bytes = max_video_bytes
         self._max_video_duration_seconds = max_video_duration_seconds
         self._transcriber = transcriber
+        self._jobs: dict[SessionKey, ExplanationJobHandle] = {}
+        self._jobs_lock = threading.Lock()
 
     def enqueue(self, *, client: Any, session: ThreadSession) -> None:
         context = ExplanationContext(
@@ -86,14 +143,40 @@ class ExplanationOrchestrator:
             channel_id=session.key.channel_id,
             thread_ts=session.key.thread_ts,
         )
-        self._executor.submit(lambda: self._run(client=client, context=context, session=session))
+        handle = self._register_job(session.key)
+        try:
+            self._executor.submit(lambda: self._run(client=client, context=context, session=session, handle=handle))
+        except Exception:
+            handle.try_claim_terminal("startup_failure")
+            self._unregister_job(session.key, handle)
+            raise
 
-    def _run(self, *, client: Any, context: ExplanationContext, session: ThreadSession) -> None:
+    def has_active_job(self, key: SessionKey) -> bool:
+        with self._jobs_lock:
+            handle = self._jobs.get(key)
+        return handle.is_active() if handle is not None else False
+
+    def request_cancel(self, key: SessionKey) -> str:
+        with self._jobs_lock:
+            handle = self._jobs.get(key)
+        if handle is None:
+            return "missing"
+        return handle.request_cancel()
+
+    def _run(
+        self,
+        *,
+        client: Any,
+        context: ExplanationContext,
+        session: ThreadSession,
+        handle: ExplanationJobHandle,
+    ) -> None:
         workspace = None
         terminal_state = "failure"
         try:
             adapter = self._file_adapter_factory(client)
             file_record = adapter.get_file_record(session.file_id)
+            self._raise_if_cancelled(handle)
             prepared = prepare_media_evidence(
                 byte_stream=adapter.iter_download_bytes(file_record),
                 request_id=f"{context.team_id}-{context.channel_id}-{context.thread_ts}",
@@ -110,12 +193,17 @@ class ExplanationOrchestrator:
             interval_results = analyze_video_segments(
                 prepared=prepared,
                 analyzer=analyzer,
+                cancellation_checkpoint=lambda: self._raise_if_cancelled(handle),
             )
-            publish_succeeded = True
-            for message in render_explanation_replies(
+            self._raise_if_cancelled(handle)
+            messages = render_explanation_replies(
                 interval_results=interval_results,
                 audio_evidence=prepared.audio_evidence,
-            ):
+            )
+            if messages and not handle.start_publication():
+                raise ExplanationCancelled()
+            publish_succeeded = True
+            for message in messages:
                 publish_succeeded = (
                     self._post_message(
                         client,
@@ -125,18 +213,44 @@ class ExplanationOrchestrator:
                     )
                     and publish_succeeded
                 )
+            self._raise_if_cancelled(handle)
             terminal_state = "success" if publish_succeeded else "publish_failure"
+            handle.try_claim_terminal(terminal_state)
+        except ExplanationCancelled:
+            terminal_state = handle.terminal_outcome() or "cancelled"
         except Exception as exc:
-            publish_succeeded = self._post_message(
-                client,
-                channel=context.channel_id,
-                thread_ts=context.thread_ts,
-                text=failure_message_for_exception(exc),
-            )
-            terminal_state = "failure" if publish_succeeded else "publish_failure"
+            if handle.try_claim_terminal("failure"):
+                publish_succeeded = self._post_message(
+                    client,
+                    channel=context.channel_id,
+                    thread_ts=context.thread_ts,
+                    text=failure_message_for_exception(exc),
+                )
+                terminal_state = "failure" if publish_succeeded else "publish_failure"
+            else:
+                terminal_state = handle.terminal_outcome() or terminal_state
         finally:
             if workspace is not None:
                 workspace.cleanup(state=terminal_state, logger=self._logger)
+            self._unregister_job(session.key, handle)
+
+    def _register_job(self, key: SessionKey) -> ExplanationJobHandle:
+        with self._jobs_lock:
+            if key in self._jobs:
+                raise RuntimeError("An explanation job is already active for this thread.")
+            handle = ExplanationJobHandle()
+            self._jobs[key] = handle
+            return handle
+
+    def _unregister_job(self, key: SessionKey, handle: ExplanationJobHandle) -> None:
+        with self._jobs_lock:
+            if self._jobs.get(key) is handle:
+                self._jobs.pop(key, None)
+
+    def _raise_if_cancelled(self, handle: ExplanationJobHandle) -> None:
+        if not handle.try_claim_cancelled():
+            return
+        raise ExplanationCancelled()
 
     def _post_message(self, client: Any, *, channel: str, thread_ts: str, text: str) -> bool:
         try:
@@ -166,17 +280,22 @@ def analyze_video_segments(
     *,
     prepared: PreparedMediaEvidence,
     analyzer: ClaudeAnalyzer,
+    cancellation_checkpoint: Callable[[], None] | None = None,
 ) -> tuple[SegmentAnalysisOutcome, ...]:
     intervals = plan_segment_intervals(prepared.metadata.duration_seconds)
     outcomes: list[SegmentAnalysisOutcome] = []
 
     for interval in intervals:
+        if cancellation_checkpoint is not None:
+            cancellation_checkpoint()
         try:
             segment = extract_segment_frames(
                 prepared.source_path,
                 workspace=prepared.workspace,
                 interval=interval,
             )
+            if cancellation_checkpoint is not None:
+                cancellation_checkpoint()
             request = build_analysis_request(segment)
             result = analyzer.analyze(request)
         except (AnalysisTimeoutError, AnalysisBudgetError, AnalysisProviderError, AnalysisInvalidResponseError):

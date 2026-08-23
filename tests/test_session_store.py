@@ -102,3 +102,40 @@ def test_session_store_can_roll_back_failed_explain_start_for_retry() -> None:
     assert retried.reason == "explanation_requested"
     assert retried.session is not None
     assert retried.session.status is SessionStatus.EXPLANATION_REQUESTED
+
+
+def test_session_store_cancels_only_active_explanation_jobs() -> None:
+    store = ThreadSessionStore()
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    explain = store.apply_command(key, CanonicalCommand.EXPLAIN)
+    cancel = store.apply_command(key, CanonicalCommand.CANCEL, explanation_cancel_status="accepted")
+    duplicate_cancel = store.apply_command(key, CanonicalCommand.CANCEL, explanation_cancel_status="already_requested")
+    export_after_cancel = store.apply_command(key, CanonicalCommand.EXPORT)
+
+    assert explain.reason == "explanation_requested"
+    assert cancel.reason == "explanation_cancelled"
+    assert cancel.session is not None
+    assert cancel.session.status is SessionStatus.EXPLANATION_CANCELLED
+    assert duplicate_cancel.reason == "explanation_already_cancelled"
+    assert export_after_cancel.reason == "export_no_longer_available"
+
+
+def test_session_store_keeps_requested_explanation_when_cancel_cannot_claim_job() -> None:
+    store = ThreadSessionStore()
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPLAIN)
+
+    publish_won = store.apply_command(key, CanonicalCommand.CANCEL, explanation_cancel_status="publication_started")
+    completed_won = store.apply_command(key, CanonicalCommand.CANCEL, explanation_cancel_status="terminal")
+    no_job = store.apply_command(key, CanonicalCommand.CANCEL, explanation_cancel_status="missing")
+
+    assert publish_won.reason == "explanation_already_completed"
+    assert completed_won.reason == "explanation_already_completed"
+    assert no_job.reason == "nothing_to_cancel"
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.EXPLANATION_REQUESTED
