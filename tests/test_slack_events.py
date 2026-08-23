@@ -6,6 +6,7 @@ from typing import Any
 from slack_video_assistant.explanation_orchestrator import ExplanationOrchestrator
 from slack_video_assistant.session_store import (
     CanonicalCommand,
+    ExportRequest,
     SessionKey,
     SessionStatus,
     ThreadSessionStore,
@@ -66,6 +67,14 @@ class RaisingExplanationOrchestrator:
         self.calls += 1
         raise RuntimeError("executor failed")
 
+
+class RecordingExportExecutor:
+    def __init__(self) -> None:
+        self.requests: list[tuple[Any, ExportRequest]] = []
+
+    def submit(self, *, client: Any, request: ExportRequest) -> None:
+        self.requests.append((client, request))
+
 class FakeApp:
     def __init__(self) -> None:
         self.handlers: dict[str, Any] = {}
@@ -80,6 +89,7 @@ class FakeApp:
 
 def make_handler(
     explanation_orchestrator: ExplanationOrchestrator | RecordingExplanationOrchestrator | None = None,
+    export_executor: RecordingExportExecutor | None = None,
 ) -> tuple[SlackEventHandler, ThreadSessionStore]:
     store = ThreadSessionStore()
 
@@ -98,6 +108,7 @@ def make_handler(
             processed_events=ProcessedEventStore(),
             logger=logging.getLogger("tests.slack_events"),
             explanation_orchestrator=explanation_orchestrator,
+            export_executor=export_executor,
         ),
         store,
     )
@@ -313,7 +324,8 @@ def test_file_shared_with_multiple_threads_in_same_channel_requests_thread_retry
 
 
 def test_message_commands_transition_state_and_handle_duplicates_safely() -> None:
-    handler, store = make_handler()
+    export_executor = RecordingExportExecutor()
+    handler, store = make_handler(export_executor=export_executor)
     client = FakeSlackClient(make_file_response())
     key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
     store.receive_video(key, file_id="F1")
@@ -336,6 +348,7 @@ def test_message_commands_transition_state_and_handle_duplicates_safely() -> Non
         ack=lambda: None,
         client=client,
     )
+    assert export_executor.requests == []
     handler.handle_message(
         body={
             "event_id": "Ev4",
@@ -356,14 +369,135 @@ def test_message_commands_transition_state_and_handle_duplicates_safely() -> Non
     )
 
     assert [payload[1]["text"] for payload in client.calls if payload[0] == "chat_postMessage"] == [
-        "Export request noted. Reply with `confirm` to continue or `cancel` to stop.",
-        "An export confirmation is already pending for this thread.",
-        "Confirmation recorded. This task slice stops before FFmpeg export work starts.",
+        "I suggest a 16:9 MP4 export with a centered crop for this MVP. Reply with `confirm` to continue or `cancel` to stop.",
+        "A 16:9 export suggestion with a centered crop is already pending for this thread. Reply with `confirm` or `cancel`.",
+        "Confirmation recorded. I handed the approved 16:9 centered-crop export request to the next execution step.",
         "There is no pending export to confirm in this thread.",
+    ]
+    assert export_executor.requests == [
+        (
+            client,
+            ExportRequest(key=key, file_id="F1", target_ratio="16:9"),
+        )
     ]
     session = store.get(key)
     assert session is not None
     assert session.status is SessionStatus.CONFIRMATION_CONSUMED
+
+
+def test_confirm_without_export_executor_reports_saved_confirmation_without_handoff_claim() -> None:
+    handler, store = make_handler()
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-confirm-no-executor",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "confirm"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert [payload[1]["text"] for payload in client.calls if payload[0] == "chat_postMessage"] == [
+        "Confirmation recorded. The approved 16:9 centered-crop export request is saved for this thread.",
+    ]
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.CONFIRMATION_CONSUMED
+
+
+def test_export_requires_eligible_video_session_and_does_not_submit_executor() -> None:
+    export_executor = RecordingExportExecutor()
+    handler, _ = make_handler(export_executor=export_executor)
+    client = FakeSlackClient(make_file_response())
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-export-missing",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "export"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert export_executor.requests == []
+    assert [payload[1]["text"] for payload in client.calls if payload[0] == "chat_postMessage"] == [
+        "Please share an MP4 in this thread first so I can track the request.",
+    ]
+
+
+def test_cancel_pending_export_clears_state_without_executor_side_effects() -> None:
+    export_executor = RecordingExportExecutor()
+    handler, store = make_handler(export_executor=export_executor)
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-cancel-export-1",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "cancel"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+    handler.handle_message(
+        body={
+            "event_id": "Ev-cancel-export-2",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "cancel"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert export_executor.requests == []
+    assert [payload[1]["text"] for payload in client.calls if payload[0] == "chat_postMessage"] == [
+        "Export request cancelled for this thread.",
+        "There is no active explanation or pending export to cancel in this thread.",
+    ]
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.CANCELLATION_CONSUMED
+
+
+def test_confirm_is_thread_isolated_and_does_not_submit_other_thread_request() -> None:
+    export_executor = RecordingExportExecutor()
+    handler, store = make_handler(export_executor=export_executor)
+    client = FakeSlackClient(make_file_response())
+    first_key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    second_key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0002")
+    store.receive_video(first_key, file_id="F1")
+    store.receive_video(second_key, file_id="F2")
+    store.apply_command(first_key, CanonicalCommand.EXPORT)
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-confirm-wrong-thread",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0002", "text": "confirm"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert export_executor.requests == []
+    assert [payload[1]["text"] for payload in client.calls if payload[0] == "chat_postMessage"] == [
+        "There is no pending export to confirm in this thread.",
+    ]
+    first_session = store.get(first_key)
+    second_session = store.get(second_key)
+    assert first_session is not None
+    assert first_session.status is SessionStatus.EXPORT_PENDING
+    assert second_session is not None
+    assert second_session.status is SessionStatus.VIDEO_RECEIVED
 
 
 def test_cancel_active_explanation_requests_cooperative_cancellation() -> None:

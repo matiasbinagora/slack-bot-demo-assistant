@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Protocol
+
+
+DEFAULT_EXPORT_RATIO = "16:9"
+SUPPORTED_EXPORT_RATIOS = ("16:9", "9:16", "1:1")
 
 
 class SessionStatus(str, Enum):
@@ -28,10 +33,28 @@ class SessionKey:
 
 
 @dataclass(frozen=True)
+class ExportSuggestion:
+    target_ratio: str
+    crop_mode: str = "centered"
+
+
+@dataclass(frozen=True)
+class ExportRequest:
+    key: SessionKey
+    file_id: str
+    target_ratio: str
+
+
+class ExportExecutor(Protocol):
+    def submit(self, *, client: Any, request: ExportRequest) -> None: ...
+
+
+@dataclass(frozen=True)
 class ThreadSession:
     key: SessionKey
     file_id: str
     status: SessionStatus
+    pending_export: ExportSuggestion | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +62,7 @@ class TransitionResult:
     state_changed: bool
     session: ThreadSession | None
     reason: str
+    export_request: ExportRequest | None = None
 
 
 class ThreadSessionStore:
@@ -81,15 +105,32 @@ class ThreadSessionStore:
 
         if command is CanonicalCommand.EXPORT:
             if session.status in (SessionStatus.VIDEO_RECEIVED, SessionStatus.EXPLANATION_REQUESTED):
-                return self._replace(key, session, SessionStatus.EXPORT_PENDING, "export_pending")
+                return self._replace(
+                    key,
+                    session,
+                    SessionStatus.EXPORT_PENDING,
+                    "export_pending",
+                    pending_export=self._build_export_suggestion(session),
+                )
             if session.status is SessionStatus.EXPORT_PENDING:
                 return TransitionResult(state_changed=False, session=session, reason="export_already_pending")
             return TransitionResult(state_changed=False, session=session, reason="export_no_longer_available")
 
         if command is CanonicalCommand.CONFIRM:
-            if session.status is not SessionStatus.EXPORT_PENDING:
+            if session.status is not SessionStatus.EXPORT_PENDING or session.pending_export is None:
                 return TransitionResult(state_changed=False, session=session, reason="missing_pending_export")
-            return self._replace(key, session, SessionStatus.CONFIRMATION_CONSUMED, "confirmation_consumed")
+            export_request = ExportRequest(
+                key=key,
+                file_id=session.file_id,
+                target_ratio=session.pending_export.target_ratio,
+            )
+            return self._replace(
+                key,
+                session,
+                SessionStatus.CONFIRMATION_CONSUMED,
+                "confirmation_consumed",
+                export_request=export_request,
+            )
 
         if session.status is SessionStatus.EXPORT_PENDING:
             return self._replace(key, session, SessionStatus.CANCELLATION_CONSUMED, "cancellation_consumed")
@@ -116,7 +157,25 @@ class ThreadSessionStore:
         session: ThreadSession,
         target: SessionStatus,
         reason: str,
+        *,
+        pending_export: ExportSuggestion | None = None,
+        export_request: ExportRequest | None = None,
     ) -> TransitionResult:
-        next_session = ThreadSession(key=key, file_id=session.file_id, status=target)
+        next_pending_export = pending_export if target is SessionStatus.EXPORT_PENDING else None
+        next_session = ThreadSession(
+            key=key,
+            file_id=session.file_id,
+            status=target,
+            pending_export=next_pending_export,
+        )
         self._sessions[key] = next_session
-        return TransitionResult(state_changed=True, session=next_session, reason=reason)
+        return TransitionResult(
+            state_changed=True,
+            session=next_session,
+            reason=reason,
+            export_request=export_request,
+        )
+
+    def _build_export_suggestion(self, session: ThreadSession) -> ExportSuggestion:
+        del session
+        return ExportSuggestion(target_ratio=DEFAULT_EXPORT_RATIO)
