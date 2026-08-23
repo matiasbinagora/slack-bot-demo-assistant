@@ -323,6 +323,64 @@ def test_publication_checkpoint_blocks_late_cancel_from_claiming_cancelled() -> 
     assert handle.terminal_outcome() == "success"
 
 
+def test_cancel_before_publication_checkpoint_prevents_publish_atomically(tmp_path: Path, monkeypatch) -> None:
+    prepared = make_prepared_media(tmp_path, duration_seconds=25.0)
+    adapter = FakeAdapter(b"fake-mp4")
+    client = FakeSlackClient()
+    executor = DeferredExecutor()
+    analyzer = SequenceAnalyzer(
+        outcomes=[
+            AnalysisResult(summary="One.", key_points=("P1",), timestamps_available=False, timestamps=()),
+            AnalysisResult(summary="Two.", key_points=("P2",), timestamps_available=False, timestamps=()),
+            AnalysisResult(summary="Three.", key_points=("P3",), timestamps_available=False, timestamps=()),
+        ],
+        calls=[],
+    )
+    cleanup_states: list[str] = []
+    original_cleanup = prepared.workspace.cleanup
+
+    def record_cleanup(*, state: str, logger: logging.Logger | None = None):
+        cleanup_states.append(state)
+        return original_cleanup(state=state, logger=logger)
+
+    def render_and_cancel(*, interval_results, audio_evidence):
+        messages = render_explanation_replies(interval_results=interval_results, audio_evidence=audio_evidence)
+        assert messages
+        assert orchestrator.request_cancel(session.key) == "accepted"
+        return messages
+
+    monkeypatch.setattr(prepared.workspace, "cleanup", record_cleanup)
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.prepare_media_evidence",
+        lambda **kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.extract_segment_frames",
+        lambda source_path, workspace, interval: make_segment(interval, workspace),
+    )
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.render_explanation_replies",
+        render_and_cancel,
+    )
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: adapter,
+        analyzer_factory=lambda: analyzer,
+        executor=executor,
+        logger=logging.getLogger("tests.explanation.cancel_before_publication_checkpoint"),
+        temp_root=tmp_path / "work",
+    )
+    session = make_session()
+
+    orchestrator.enqueue(client=client, session=session)
+    executor.jobs[0]()
+
+    assert len(analyzer.calls) == 3
+    assert client.calls == []
+    assert cleanup_states == ["cancelled"]
+    assert prepared.workspace.root.exists() is False
+    assert orchestrator.request_cancel(session.key) == "missing"
+
+
 def test_cancellation_between_segments_prevents_publish_and_cleans_once(tmp_path: Path, monkeypatch) -> None:
     prepared = make_prepared_media(tmp_path, duration_seconds=25.0)
     adapter = FakeAdapter(b"fake-mp4")
@@ -403,6 +461,13 @@ def test_publication_started_outcome_wins_over_late_cancel(tmp_path: Path, monke
         ],
         calls=[],
     )
+    cleanup_states: list[str] = []
+    original_cleanup = prepared.workspace.cleanup
+
+    def record_cleanup(*, state: str, logger: logging.Logger | None = None):
+        cleanup_states.append(state)
+        return original_cleanup(state=state, logger=logger)
+
     monkeypatch.setattr(
         "slack_video_assistant.explanation_orchestrator.prepare_media_evidence",
         lambda **kwargs: prepared,
@@ -411,6 +476,7 @@ def test_publication_started_outcome_wins_over_late_cancel(tmp_path: Path, monke
         "slack_video_assistant.explanation_orchestrator.extract_segment_frames",
         lambda source_path, workspace, interval: make_segment(interval, workspace),
     )
+    monkeypatch.setattr(prepared.workspace, "cleanup", record_cleanup)
     orchestrator = ExplanationOrchestrator(
         file_adapter_factory=lambda _: adapter,
         analyzer_factory=lambda: analyzer,
@@ -433,6 +499,7 @@ def test_publication_started_outcome_wins_over_late_cancel(tmp_path: Path, monke
 
     assert len(client.calls) == 1
     assert "Summary: One." in client.calls[0]["text"]
+    assert cleanup_states == ["success"]
     assert prepared.workspace.root.exists() is False
 
 
