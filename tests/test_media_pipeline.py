@@ -11,6 +11,7 @@ from slack_video_assistant.media_pipeline import (
     CleanupResult,
     DEFAULT_MAX_VIDEO_DURATION_SECONDS,
     EvidenceStatus,
+    ExportedVideo,
     MAX_SEGMENTS,
     MediaExtractionError,
     MediaProbeError,
@@ -23,11 +24,13 @@ from slack_video_assistant.media_pipeline import (
     VideoMetadata,
     _optional_string,
     build_audio_evidence,
+    export_video,
     extract_segment_frames,
     extract_frames,
     plan_segment_intervals,
     prepare_media_evidence,
     probe_video,
+    validate_exported_video,
 )
 
 
@@ -534,3 +537,105 @@ def test_run_ffprobe_hides_raw_diagnostics(monkeypatch, tmp_path: Path) -> None:
         probe_video(source_fixture)
 
     assert str(exc_info.value) == "FFprobe could not validate this upload safely."
+
+
+@pytest.mark.parametrize(
+    ("fixture_size", "target_ratio", "expected_dimensions"),
+    [
+        ("160x90", "16:9", (160, 90)),
+        ("160x90", "9:16", (36, 64)),
+        ("160x90", "1:1", (90, 90)),
+        ("90x160", "16:9", (64, 36)),
+        ("90x160", "9:16", (90, 160)),
+        ("90x160", "1:1", (90, 90)),
+        ("120x120", "16:9", (96, 54)),
+        ("120x120", "9:16", (54, 96)),
+        ("120x120", "1:1", (120, 120)),
+    ],
+)
+def test_export_video_creates_valid_centered_h264_aac_mp4_for_supported_ratios(
+    tmp_path: Path,
+    fixture_size: str,
+    target_ratio: str,
+    expected_dimensions: tuple[int, int],
+) -> None:
+    source_fixture = build_mp4_fixture(
+        tmp_path,
+        name=f"export-{fixture_size.replace('x', '-')}-{target_ratio.replace(':', '-')}",
+        with_audio=True,
+        duration_seconds=1,
+        size=fixture_size,
+    )
+    original_bytes = source_fixture.read_bytes()
+    workspace = MediaWorkspace.create(temp_root=tmp_path, request_id=f"export-{target_ratio}")
+
+    exported = export_video(
+        source_path=source_fixture,
+        workspace=workspace,
+        target_ratio=target_ratio,
+    )
+
+    assert isinstance(exported, ExportedVideo)
+    assert exported.output_path.exists() is True
+    assert exported.output_path != source_fixture
+    assert (exported.metadata.width, exported.metadata.height) == expected_dimensions
+    assert exported.metadata.video_codec == "h264"
+    assert exported.metadata.audio_codec == "aac"
+    assert source_fixture.read_bytes() == original_bytes
+    cleanup = workspace.cleanup(state="success")
+    assert cleanup.succeeded is True
+
+
+def test_export_video_adds_aac_audio_when_source_has_no_audio(tmp_path: Path) -> None:
+    source_fixture = build_mp4_fixture(
+        tmp_path,
+        name="export-without-audio",
+        with_audio=False,
+        duration_seconds=1,
+        size="120x120",
+    )
+    workspace = MediaWorkspace.create(temp_root=tmp_path, request_id="no-audio-export")
+
+    exported = export_video(
+        source_path=source_fixture,
+        workspace=workspace,
+        target_ratio="1:1",
+    )
+
+    assert exported.metadata.has_audio is True
+    assert exported.metadata.audio_codec == "aac"
+    cleanup = workspace.cleanup(state="success")
+    assert cleanup.succeeded is True
+
+
+def test_validate_exported_video_rejects_unexpected_codecs(tmp_path: Path) -> None:
+    output_path = tmp_path / "unexpected-codec.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=120x120:rate=5:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:duration=1",
+            "-c:v",
+            "mpeg4",
+            "-c:a",
+            "aac",
+            str(output_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    with pytest.raises(MediaValidationError) as exc_info:
+        validate_exported_video(output_path, target_ratio="1:1", expected_width=120, expected_height=120)
+
+    assert str(exc_info.value) == "The export did not produce an H.264 video stream."

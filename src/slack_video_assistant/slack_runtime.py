@@ -4,10 +4,15 @@ from dataclasses import dataclass
 from logging import Logger
 from typing import Any, Callable
 
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
+try:
+    from slack_bolt import App
+    from slack_bolt.adapter.socket_mode import SocketModeHandler
+except ModuleNotFoundError:  # pragma: no cover - exercised in dependency-light test environments
+    App = Any
+    SocketModeHandler = Any
 
 from slack_video_assistant.config import SlackSettings
+from slack_video_assistant.export_orchestrator import ExportOrchestrator
 from slack_video_assistant.explanation_orchestrator import ExplanationOrchestrator
 from slack_video_assistant.media_pipeline import _prepare_temp_root
 from slack_video_assistant.session_store import ThreadSessionStore
@@ -81,6 +86,13 @@ def build_slack_runtime(
             processed_events=ProcessedEventStore(),
             logger=logger,
             explanation_orchestrator=ExplanationOrchestrator(
+                file_adapter_factory=_file_adapter_factory,
+                logger=logger,
+                temp_root=prepared_temp_root,
+                max_video_bytes=settings.max_video_bytes,
+                max_video_duration_seconds=settings.max_video_duration_seconds,
+            ),
+            export_executor=ExportOrchestrator(
                 file_adapter_factory=_file_adapter_factory,
                 logger=logger,
                 temp_root=prepared_temp_root,

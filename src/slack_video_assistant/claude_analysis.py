@@ -125,6 +125,15 @@ class PromptEnvelope:
     user_content: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class _FallbackClaudeAgentOptions:
+    system_prompt: str
+    output_format: dict[str, Any]
+    max_turns: int
+    tools: list[Any]
+    env: dict[str, str]
+
+
 def build_prompt_envelope(request: AnalysisRequest) -> PromptEnvelope:
     transcript_text = redact_sensitive(request.transcript.text) if request.transcript else None
     if transcript_text is not None and len(transcript_text) > MAX_TRANSCRIPT_CHARS:
@@ -280,10 +289,15 @@ class ClaudeAnalyzer:
             try:
                 from claude_agent_sdk import ClaudeAgentOptions
             except ImportError as exc:  # pragma: no cover
-                raise AnalysisConfigurationError(
-                    "claude-agent-sdk is not installed. Install the pinned project dependency before running analysis."
-                ) from exc
-            options_factory = ClaudeAgentOptions
+                if self._query_runner is None:
+                    raise AnalysisConfigurationError(
+                        "claude-agent-sdk is not installed. Install the pinned project dependency before running analysis."
+                    ) from exc
+                # Test-only fallback for injected fake query runners in dependency-light environments.
+                # The real SDK path above still requires and uses claude_agent_sdk.ClaudeAgentOptions.
+                options_factory = _FallbackClaudeAgentOptions
+            else:
+                options_factory = ClaudeAgentOptions
 
         options = options_factory(
             system_prompt=envelope.system_prompt,
