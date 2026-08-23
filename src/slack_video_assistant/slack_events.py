@@ -8,6 +8,7 @@ from slack_video_assistant.explanation_orchestrator import ExplanationOrchestrat
 from slack_video_assistant.logging_utils import redact_sensitive
 from slack_video_assistant.session_store import (
     CanonicalCommand,
+    ExportExecutor,
     SessionKey,
     SessionStatus,
     ThreadSessionStore,
@@ -48,12 +49,14 @@ class SlackEventHandler:
         processed_events: ProcessedEventStore,
         logger: Logger,
         explanation_orchestrator: ExplanationOrchestrator | None = None,
+        export_executor: ExportExecutor | None = None,
     ) -> None:
         self._file_adapter_factory = file_adapter_factory
         self._session_store = session_store
         self._processed_events = processed_events
         self._logger = logger
         self._explanation_orchestrator = explanation_orchestrator
+        self._export_executor = export_executor
 
     def handle_file_shared(self, *, body: Mapping[str, Any], ack: AckCallable, client: Any) -> None:
         ack()
@@ -191,6 +194,19 @@ class SlackEventHandler:
                 text="I’m preparing an explanation for this video now. I’ll reply in this thread when it’s ready.",
             )
             return
+
+        if command is CanonicalCommand.CONFIRM and result.export_request is not None and self._export_executor is not None:
+            try:
+                self._export_executor.submit(client=client, request=result.export_request)
+            except Exception:
+                self._logger.exception("Export handoff failed to start")
+                self._post_message(
+                    client,
+                    channel=context.channel_id,
+                    thread_ts=context.thread_ts,
+                    text="I recorded your confirmation, but I couldn't hand the export request to the next step safely.",
+                )
+                return
 
         self._post_message(
             client,
@@ -370,15 +386,26 @@ def _message_for_transition(command: CanonicalCommand, result: TransitionResult)
         return "Explanation has already been requested for this thread."
 
     if command is CanonicalCommand.EXPORT:
+        pending_ratio = result.session.pending_export.target_ratio if result.session and result.session.pending_export else "16:9"
         if result.reason == "export_pending":
-            return "Export request noted. Reply with `confirm` to continue or `cancel` to stop."
+            return (
+                f"I suggest a {pending_ratio} MP4 export with a centered crop for this MVP. "
+                "Reply with `confirm` to continue or `cancel` to stop."
+            )
         if result.reason == "export_no_longer_available":
             return "This thread has already finished its export decision. Please share a new MP4 in a new thread to start over."
-        return "An export confirmation is already pending for this thread."
+        return (
+            f"A {pending_ratio} export suggestion with a centered crop is already pending for this thread. "
+            "Reply with `confirm` or `cancel`."
+        )
 
     if command is CanonicalCommand.CONFIRM:
         if result.reason == "confirmation_consumed":
-            return "Confirmation recorded. This task slice stops before FFmpeg export work starts."
+            ratio = result.export_request.target_ratio if result.export_request is not None else "16:9"
+            return (
+                f"Confirmation recorded. I handed the approved {ratio} centered-crop export request "
+                "to the next execution step."
+            )
         return "There is no pending export to confirm in this thread."
 
     if result.reason == "explanation_cancelled":
