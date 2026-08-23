@@ -12,4 +12,4 @@
 ## 3. Validation and handoff
 
 - [x] 3.1 `[backend-dev]` Run focused and full pytest suites with repository-owned/generated MP4 fixtures, compileall, `openspec validate "explanation-job-cancellation" --json`, `openspec doctor --json`, `git diff --check`, safe secret-pattern review, and FFmpeg/FFprobe smoke. Predecessor: 2.3. Report no live Slack/Anthropic QA.
-- [ ] 3.2 `[backend-dev]` Refresh Graphify and Codebase Memory for the exact worktree, update affected OpenSpec artifacts, document files/queries/evidence/risks, and prepare a separate PR without merging. Predecessor: 3.1. OpenSpec: `explanation-job-cancellation`.
+- [x] 3.2 `[backend-dev]` Refresh Graphify and Codebase Memory for the exact worktree, update affected OpenSpec artifacts, document files/queries/evidence/risks, and prepare a separate PR without merging. Predecessor: 3.1. OpenSpec: `explanation-job-cancellation`.
