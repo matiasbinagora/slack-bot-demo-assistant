@@ -47,9 +47,15 @@ class FakeDownloader:
 class RecordingExplanationOrchestrator:
     def __init__(self) -> None:
         self.sessions = []
+        self.cancel_status = "accepted"
+        self.cancel_calls = []
 
     def enqueue(self, *, client: Any, session) -> None:
         self.sessions.append((client, session))
+
+    def request_cancel(self, key: SessionKey) -> str:
+        self.cancel_calls.append(key)
+        return self.cancel_status
 
 
 class RaisingExplanationOrchestrator:
@@ -358,6 +364,77 @@ def test_message_commands_transition_state_and_handle_duplicates_safely() -> Non
     session = store.get(key)
     assert session is not None
     assert session.status is SessionStatus.CONFIRMATION_CONSUMED
+
+
+def test_cancel_active_explanation_requests_cooperative_cancellation() -> None:
+    orchestrator = RecordingExplanationOrchestrator()
+    handler, store = make_handler(orchestrator)
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPLAIN)
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-cancel-active",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "cancel"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert orchestrator.cancel_calls == [key]
+    assert [call for call in client.calls if call[0] == "chat_postMessage"] == [
+        (
+            "chat_postMessage",
+            {
+                "channel": "C1",
+                "thread_ts": "170.0001",
+                "text": "Okay — I’ll stop this explanation and clean up the temporary workspace.",
+            },
+        )
+    ]
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.EXPLANATION_CANCELLED
+
+
+def test_cancel_completed_or_missing_explanation_returns_safe_noop() -> None:
+    orchestrator = RecordingExplanationOrchestrator()
+    handler, store = make_handler(orchestrator)
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPLAIN)
+    orchestrator.cancel_status = "publication_started"
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-cancel-finished",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "cancel"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+    handler.handle_message(
+        body={
+            "event_id": "Ev-cancel-missing",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.9999", "text": "cancel"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert [payload[1]["text"] for payload in client.calls if payload[0] == "chat_postMessage"] == [
+        "The explanation has already finished, so there is nothing to cancel.",
+        "Please share an MP4 in this thread first so I can track the request.",
+    ]
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.EXPLANATION_REQUESTED
 
 
 def test_message_requires_real_thread_context_and_ignores_root_messages() -> None:

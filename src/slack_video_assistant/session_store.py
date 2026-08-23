@@ -7,6 +7,7 @@ from enum import Enum
 class SessionStatus(str, Enum):
     VIDEO_RECEIVED = "video_received"
     EXPLANATION_REQUESTED = "explanation_requested"
+    EXPLANATION_CANCELLED = "explanation_cancelled"
     EXPORT_PENDING = "export_pending"
     CONFIRMATION_CONSUMED = "confirmation_consumed"
     CANCELLATION_CONSUMED = "cancellation_consumed"
@@ -58,7 +59,13 @@ class ThreadSessionStore:
             reason="video_recorded" if state_changed else "duplicate_video",
         )
 
-    def apply_command(self, key: SessionKey, command: CanonicalCommand) -> TransitionResult:
+    def apply_command(
+        self,
+        key: SessionKey,
+        command: CanonicalCommand,
+        *,
+        explanation_cancel_status: str | None = None,
+    ) -> TransitionResult:
         session = self._sessions.get(key)
         if session is None:
             return TransitionResult(state_changed=False, session=None, reason="missing_session")
@@ -84,9 +91,16 @@ class ThreadSessionStore:
                 return TransitionResult(state_changed=False, session=session, reason="missing_pending_export")
             return self._replace(key, session, SessionStatus.CONFIRMATION_CONSUMED, "confirmation_consumed")
 
-        if session.status is not SessionStatus.EXPORT_PENDING:
-            return TransitionResult(state_changed=False, session=session, reason="nothing_to_cancel")
-        return self._replace(key, session, SessionStatus.CANCELLATION_CONSUMED, "cancellation_consumed")
+        if session.status is SessionStatus.EXPORT_PENDING:
+            return self._replace(key, session, SessionStatus.CANCELLATION_CONSUMED, "cancellation_consumed")
+        if session.status is SessionStatus.EXPLANATION_CANCELLED:
+            return TransitionResult(state_changed=False, session=session, reason="explanation_already_cancelled")
+        if session.status is SessionStatus.EXPLANATION_REQUESTED:
+            if explanation_cancel_status in {"accepted", "already_requested"}:
+                return self._replace(key, session, SessionStatus.EXPLANATION_CANCELLED, "explanation_cancelled")
+            if explanation_cancel_status in {"publication_started", "terminal"}:
+                return TransitionResult(state_changed=False, session=session, reason="explanation_already_completed")
+        return TransitionResult(state_changed=False, session=session, reason="nothing_to_cancel")
 
     def rollback_explain_request(self, key: SessionKey) -> TransitionResult:
         session = self._sessions.get(key)

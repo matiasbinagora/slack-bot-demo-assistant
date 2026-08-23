@@ -140,6 +140,7 @@ class SlackEventHandler:
             thread_ts=context.thread_ts,
         )
         existing_session = self._session_store.get(key)
+        explanation_cancel_status: str | None = None
         if (
             command is CanonicalCommand.EXPLAIN
             and self._explanation_orchestrator is None
@@ -154,7 +155,19 @@ class SlackEventHandler:
             )
             return
 
-        result = self._session_store.apply_command(key, command)
+        if (
+            command is CanonicalCommand.CANCEL
+            and existing_session is not None
+            and existing_session.status is SessionStatus.EXPLANATION_REQUESTED
+            and self._explanation_orchestrator is not None
+        ):
+            explanation_cancel_status = self._explanation_orchestrator.request_cancel(key)
+
+        result = self._session_store.apply_command(
+            key,
+            command,
+            explanation_cancel_status=explanation_cancel_status,
+        )
         if command is CanonicalCommand.EXPLAIN and result.reason == "explanation_requested" and result.session:
             try:
                 if self._explanation_orchestrator is None:
@@ -368,6 +381,12 @@ def _message_for_transition(command: CanonicalCommand, result: TransitionResult)
             return "Confirmation recorded. This task slice stops before FFmpeg export work starts."
         return "There is no pending export to confirm in this thread."
 
+    if result.reason == "explanation_cancelled":
+        return "Okay — I’ll stop this explanation and clean up the temporary workspace."
+    if result.reason == "explanation_already_cancelled":
+        return "This explanation is already being cancelled."
+    if result.reason == "explanation_already_completed":
+        return "The explanation has already finished, so there is nothing to cancel."
     if result.reason == "cancellation_consumed":
         return "Export request cancelled for this thread."
-    return "There is no pending export to cancel in this thread."
+    return "There is no active explanation or pending export to cancel in this thread."

@@ -18,6 +18,7 @@ from slack_video_assistant.claude_analysis import (
     build_prompt_envelope,
 )
 from slack_video_assistant.explanation_orchestrator import (
+    ExplanationJobHandle,
     ExplanationOrchestrator,
     SegmentAnalysisSuccess,
     SegmentAnalysisUnavailable,
@@ -252,6 +253,167 @@ def test_explain_acknowledges_and_schedules_background_job_without_running_inlin
     assert "Interval 00:20 to 00:25" in client.calls[-1]["text"]
 
     prepared.workspace.cleanup(state="success")
+
+
+
+def test_cancel_before_worker_start_stops_without_publish(tmp_path: Path) -> None:
+    adapter = FakeAdapter(b"fake-mp4")
+    client = FakeSlackClient()
+    executor = DeferredExecutor()
+    analyzer = SequenceAnalyzer(
+        outcomes=[AnalysisResult(summary="unused", key_points=("unused",), timestamps_available=False, timestamps=())],
+        calls=[],
+    )
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: adapter,
+        analyzer_factory=lambda: analyzer,
+        executor=executor,
+        logger=logging.getLogger("tests.explanation.cancel_before_start"),
+        temp_root=tmp_path / "work",
+    )
+    session = make_session()
+
+    orchestrator.enqueue(client=client, session=session)
+
+    assert orchestrator.has_active_job(session.key) is True
+    assert orchestrator.request_cancel(session.key) == "accepted"
+
+    executor.jobs[0]()
+
+    assert client.calls == []
+    assert analyzer.calls == []
+    assert orchestrator.request_cancel(session.key) == "missing"
+
+
+def test_request_cancel_is_idempotent_and_scoped_to_matching_session(tmp_path: Path) -> None:
+    adapter = FakeAdapter(b"fake-mp4")
+    executor = DeferredExecutor()
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: adapter,
+        executor=executor,
+        logger=logging.getLogger("tests.explanation.cancel_lookup"),
+        temp_root=tmp_path / "work",
+    )
+    session = make_session()
+
+    orchestrator.enqueue(client=FakeSlackClient(), session=session)
+
+    assert orchestrator.request_cancel(SessionKey(team_id="T1", channel_id="other", thread_ts="999.1")) == "missing"
+    assert orchestrator.request_cancel(session.key) == "accepted"
+    assert orchestrator.request_cancel(session.key) == "already_requested"
+
+
+def test_cancellation_between_segments_prevents_publish_and_cleans_once(tmp_path: Path, monkeypatch) -> None:
+    prepared = make_prepared_media(tmp_path, duration_seconds=25.0)
+    adapter = FakeAdapter(b"fake-mp4")
+    client = FakeSlackClient()
+    executor = DeferredExecutor()
+    analyzer = SequenceAnalyzer(
+        outcomes=[
+            AnalysisResult(summary="One.", key_points=("P1",), timestamps_available=False, timestamps=()),
+            AnalysisResult(summary="Two.", key_points=("P2",), timestamps_available=False, timestamps=()),
+        ],
+        calls=[],
+    )
+    cleanup_states: list[str] = []
+    original_cleanup = prepared.workspace.cleanup
+
+    def record_cleanup(*, state: str, logger: logging.Logger | None = None):
+        cleanup_states.append(state)
+        return original_cleanup(state=state, logger=logger)
+
+    monkeypatch.setattr(prepared.workspace, "cleanup", record_cleanup)
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.prepare_media_evidence",
+        lambda **kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.extract_segment_frames",
+        lambda source_path, workspace, interval: make_segment(interval, workspace),
+    )
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: adapter,
+        analyzer_factory=lambda: analyzer,
+        executor=executor,
+        logger=logging.getLogger("tests.explanation.cancel_between_segments"),
+        temp_root=tmp_path / "work",
+    )
+    session = make_session()
+
+    original_analyze = analyze_video_segments
+
+    def cancel_during_analysis(*, prepared, analyzer, cancellation_checkpoint=None):
+        assert cancellation_checkpoint is not None
+
+        def wrapped_checkpoint() -> None:
+            if len(analyzer.calls) == 1:
+                assert orchestrator.request_cancel(session.key) == "accepted"
+            cancellation_checkpoint()
+
+        return original_analyze(
+            prepared=prepared,
+            analyzer=analyzer,
+            cancellation_checkpoint=wrapped_checkpoint,
+        )
+
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.analyze_video_segments",
+        cancel_during_analysis,
+    )
+
+    orchestrator.enqueue(client=client, session=session)
+    executor.jobs[0]()
+
+    assert len(analyzer.calls) == 1
+    assert client.calls == []
+    assert cleanup_states == ["cancelled"]
+    assert prepared.workspace.root.exists() is False
+
+
+def test_publication_started_outcome_wins_over_late_cancel(tmp_path: Path, monkeypatch) -> None:
+    prepared = make_prepared_media(tmp_path, duration_seconds=25.0)
+    adapter = FakeAdapter(b"fake-mp4")
+    client = FakeSlackClient()
+    executor = DeferredExecutor()
+    analyzer = SequenceAnalyzer(
+        outcomes=[
+            AnalysisResult(summary="One.", key_points=("P1",), timestamps_available=False, timestamps=()),
+            AnalysisResult(summary="Two.", key_points=("P2",), timestamps_available=False, timestamps=()),
+            AnalysisResult(summary="Three.", key_points=("P3",), timestamps_available=False, timestamps=()),
+        ],
+        calls=[],
+    )
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.prepare_media_evidence",
+        lambda **kwargs: prepared,
+    )
+    monkeypatch.setattr(
+        "slack_video_assistant.explanation_orchestrator.extract_segment_frames",
+        lambda source_path, workspace, interval: make_segment(interval, workspace),
+    )
+    orchestrator = ExplanationOrchestrator(
+        file_adapter_factory=lambda _: adapter,
+        analyzer_factory=lambda: analyzer,
+        executor=executor,
+        logger=logging.getLogger("tests.explanation.publication_wins"),
+        temp_root=tmp_path / "work",
+    )
+    session = make_session()
+
+    orchestrator.enqueue(client=client, session=session)
+    original_post = orchestrator._post_message
+
+    def post_and_try_cancel(*args, **kwargs):
+        result = original_post(*args, **kwargs)
+        assert orchestrator.request_cancel(session.key) == "publication_started"
+        return result
+
+    monkeypatch.setattr(orchestrator, "_post_message", post_and_try_cancel)
+    executor.jobs[0]()
+
+    assert len(client.calls) == 1
+    assert "Summary: One." in client.calls[0]["text"]
+    assert prepared.workspace.root.exists() is False
 
 
 def test_build_analysis_request_uses_segment_local_controlled_frame_evidence(tmp_path: Path) -> None:
