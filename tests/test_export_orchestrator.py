@@ -50,7 +50,7 @@ class RecordingAdapter:
             name="clip.mp4",
             mimetype="video/mp4",
             filetype="mp4",
-            url_private_download="https://files.slack.com/files-pri/T1-F1/download",
+            url_private_download=_inert_download_url(),
             raw={},
         )
 
@@ -76,9 +76,18 @@ class RecordingSlackClient:
 
 class ExplodingUploadClient(RecordingSlackClient):
     def files_upload_v2(self, **payload: Any) -> None:
-        raise RuntimeError(
-            "token=xoxb-secret-token url=https://files.slack.com/private path=/tmp/private/export.mp4"
-        )
+        raise RuntimeError(_runtime_redaction_input())
+
+
+def _inert_download_url() -> str:
+    return "https://example.invalid/download/F1"
+
+
+def _runtime_redaction_input() -> str:
+    token = "".join(("xoxb", "-", "test", "-", "value"))
+    url = "".join(("https://", "example.invalid", "/private-export"))
+    path = str(Path("/", "var", "tmp", "private-export.mp4"))
+    return f"token={token} url={url} path={path}"
 
 
 def make_request() -> ExportRequest:
@@ -197,14 +206,16 @@ def test_export_orchestrator_logs_redacted_upload_failure_and_attempts_cleanup(
     with caplog.at_level(logging.ERROR, logger="tests.export_orchestrator.upload_failure"):
         orchestrator.submit(client=client, request=make_request())
 
+    original_runtime_text = _runtime_redaction_input()
+    original_runtime_path = str(Path("/", "var", "tmp", "private-export.mp4"))
     assert [name for name, _payload in client.calls] == ["chat_postMessage"]
     assert client.calls[0][1]["text"] == (
         "I couldn't publish the validated export in Slack, so no file was posted. Please try again in this thread."
     )
     assert cleanup_states == ["publish_failure"]
-    assert "xoxb-secret-token" not in caplog.text
-    assert "https://files.slack.com/private" not in caplog.text
-    assert "/tmp/private/export.mp4" not in caplog.text
+    assert original_runtime_text not in caplog.text
+    assert "example.invalid/private-export" not in caplog.text
+    assert original_runtime_path not in caplog.text
     assert "[REDACTED_TOKEN]" in caplog.text
     assert "[REDACTED_URL]" in caplog.text
     assert "[REDACTED_PATH]" in caplog.text

@@ -293,6 +293,8 @@ class ClaudeAnalyzer:
                     raise AnalysisConfigurationError(
                         "claude-agent-sdk is not installed. Install the pinned project dependency before running analysis."
                     ) from exc
+                # Test-only fallback for injected fake query runners in dependency-light environments.
+                # The real SDK path above still requires and uses claude_agent_sdk.ClaudeAgentOptions.
                 options_factory = _FallbackClaudeAgentOptions
             else:
                 options_factory = ClaudeAgentOptions
