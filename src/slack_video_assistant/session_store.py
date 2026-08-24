@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 
 DEFAULT_EXPORT_RATIO = "16:9"
-SUPPORTED_EXPORT_RATIOS = ("16:9", "9:16", "1:1")
+SUPPORTED_EXPORT_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4")
 
 
 class SessionStatus(str, Enum):
@@ -36,6 +36,7 @@ class SessionKey:
 class ExportSuggestion:
     target_ratio: str
     crop_mode: str = "centered"
+    message_ts: str | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,67 @@ class ThreadSessionStore:
         if session.status is not SessionStatus.EXPLANATION_REQUESTED:
             return TransitionResult(state_changed=False, session=session, reason="rollback_not_needed")
         return self._replace(key, session, SessionStatus.VIDEO_RECEIVED, "explanation_rollback")
+
+    def bind_pending_export_message(self, key: SessionKey, *, message_ts: str) -> TransitionResult:
+        session = self._sessions.get(key)
+        if session is None:
+            return TransitionResult(state_changed=False, session=None, reason="missing_session")
+        if session.status is not SessionStatus.EXPORT_PENDING or session.pending_export is None:
+            return TransitionResult(state_changed=False, session=session, reason="missing_pending_export")
+        if session.pending_export.message_ts == message_ts:
+            return TransitionResult(state_changed=False, session=session, reason="export_message_already_bound")
+        return self._replace(
+            key,
+            session,
+            SessionStatus.EXPORT_PENDING,
+            "export_message_bound",
+            pending_export=ExportSuggestion(
+                target_ratio=session.pending_export.target_ratio,
+                crop_mode=session.pending_export.crop_mode,
+                message_ts=message_ts,
+            ),
+        )
+
+    def select_export_ratio(
+        self,
+        key: SessionKey,
+        *,
+        target_ratio: str,
+        message_ts: str | None,
+    ) -> TransitionResult:
+        if target_ratio not in SUPPORTED_EXPORT_RATIOS:
+            return TransitionResult(state_changed=False, session=self._sessions.get(key), reason="invalid_ratio")
+
+        session = self._sessions.get(key)
+        if session is None:
+            return TransitionResult(state_changed=False, session=None, reason="missing_session")
+        if session.status is not SessionStatus.EXPORT_PENDING or session.pending_export is None:
+            return TransitionResult(state_changed=False, session=session, reason="missing_pending_export")
+        if (
+            session.pending_export.message_ts is not None
+            and message_ts is not None
+            and session.pending_export.message_ts != message_ts
+        ):
+            return TransitionResult(state_changed=False, session=session, reason="stale_pending_export")
+
+        next_message_ts = message_ts or session.pending_export.message_ts
+        if (
+            session.pending_export.target_ratio == target_ratio
+            and session.pending_export.message_ts == next_message_ts
+        ):
+            return TransitionResult(state_changed=False, session=session, reason="export_ratio_unchanged")
+
+        return self._replace(
+            key,
+            session,
+            SessionStatus.EXPORT_PENDING,
+            "export_ratio_selected",
+            pending_export=ExportSuggestion(
+                target_ratio=target_ratio,
+                crop_mode=session.pending_export.crop_mode,
+                message_ts=next_message_ts,
+            ),
+        )
 
     def _replace(
         self,

@@ -11,7 +11,12 @@ from slack_video_assistant.session_store import (
     SessionStatus,
     ThreadSessionStore,
 )
-from slack_video_assistant.slack_events import ProcessedEventStore, SlackEventHandler, register_slack_handlers
+from slack_video_assistant.slack_events import (
+    EXPORT_RATIO_ACTION_ID,
+    ProcessedEventStore,
+    SlackEventHandler,
+    register_slack_handlers,
+)
 from slack_video_assistant.slack_file_adapter import SlackFileAdapter
 
 
@@ -19,6 +24,7 @@ class FakeSlackClient:
     def __init__(self, file_response: dict[str, Any]) -> None:
         self.file_response = file_response
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self._message_counter = 0
 
     def files_info(self, *, file: str) -> dict[str, Any]:
         self.calls.append(("files_info", {"file": file}))
@@ -26,6 +32,12 @@ class FakeSlackClient:
 
     def chat_postMessage(self, **payload: Any) -> None:
         self.calls.append(("chat_postMessage", payload))
+        self._message_counter += 1
+        return {"ts": f"171.000{self._message_counter}"}
+
+    def chat_update(self, **payload: Any) -> None:
+        self.calls.append(("chat_update", payload))
+        return {"ts": payload["ts"]}
 
 
 class ExplodingSlackClient(FakeSlackClient):
@@ -82,6 +94,13 @@ class FakeApp:
     def event(self, name: str):
         def _register(handler):
             self.handlers[name] = handler
+            return handler
+
+        return _register
+
+    def action(self, name: str):
+        def _register(handler):
+            self.handlers[f"action:{name}"] = handler
             return handler
 
         return _register
@@ -369,10 +388,19 @@ def test_message_commands_transition_state_and_handle_duplicates_safely() -> Non
     )
 
     assert [payload[1]["text"] for payload in client.calls if payload[0] == "chat_postMessage"] == [
-        "I suggest a 16:9 MP4 export with a centered crop for this MVP. Reply with `confirm` to continue or `cancel` to stop.",
+        "I suggest a 16:9 MP4 export with a centered crop for this MVP. Choose one of the approved ratios below, then reply with `confirm` to continue or `cancel` to stop.",
         "A 16:9 export suggestion with a centered crop is already pending for this thread. Reply with `confirm` or `cancel`.",
         "Confirmation recorded. I handed the approved 16:9 centered-crop export request to the next execution step.",
         "There is no pending export to confirm in this thread.",
+    ]
+    export_payload = [payload for name, payload in client.calls if name == "chat_postMessage"][0]
+    assert export_payload["blocks"][0]["accessory"]["action_id"] == EXPORT_RATIO_ACTION_ID
+    assert [option["value"] for option in export_payload["blocks"][0]["accessory"]["options"]] == [
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4",
     ]
     assert export_executor.requests == [
         (
@@ -498,6 +526,188 @@ def test_confirm_is_thread_isolated_and_does_not_submit_other_thread_request() -
     assert first_session.status is SessionStatus.EXPORT_PENDING
     assert second_session is not None
     assert second_session.status is SessionStatus.VIDEO_RECEIVED
+
+
+def test_ratio_action_acknowledges_updates_pending_selection_and_does_not_start_export() -> None:
+    export_executor = RecordingExportExecutor()
+    handler, store = make_handler(export_executor=export_executor)
+    client = FakeSlackClient(make_file_response())
+    order: list[str] = []
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-export-action-1",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "export"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    handler.handle_export_ratio_action(
+        body={
+            "team": {"id": "T1"},
+            "channel": {"id": "C1"},
+            "container": {"channel_id": "C1", "message_ts": "171.0001"},
+            "message": {"thread_ts": "170.0001", "ts": "171.0001"},
+            "actions": [
+                {
+                    "action_id": EXPORT_RATIO_ACTION_ID,
+                    "action_ts": "172.0001",
+                    "selected_option": {"value": "4:3"},
+                }
+            ],
+        },
+        ack=lambda: order.append("ack"),
+        client=client,
+    )
+
+    assert order == ["ack"]
+    assert export_executor.requests == []
+    update_payloads = [payload for name, payload in client.calls if name == "chat_update"]
+    assert len(update_payloads) == 1
+    assert update_payloads[0]["ts"] == "171.0001"
+    assert update_payloads[0]["blocks"][0]["accessory"]["initial_option"]["value"] == "4:3"
+    session = store.get(key)
+    assert session is not None
+    assert session.pending_export is not None
+    assert session.pending_export.target_ratio == "4:3"
+
+
+def test_ratio_action_confirm_uses_latest_selected_ratio() -> None:
+    export_executor = RecordingExportExecutor()
+    handler, store = make_handler(export_executor=export_executor)
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-export-action-2",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "export"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+    handler.handle_export_ratio_action(
+        body={
+            "team": {"id": "T1"},
+            "channel": {"id": "C1"},
+            "container": {"channel_id": "C1", "message_ts": "171.0001"},
+            "message": {"thread_ts": "170.0001", "ts": "171.0001"},
+            "actions": [
+                {
+                    "action_id": EXPORT_RATIO_ACTION_ID,
+                    "action_ts": "172.0002",
+                    "selected_option": {"value": "3:4"},
+                }
+            ],
+        },
+        ack=lambda: None,
+        client=client,
+    )
+    handler.handle_message(
+        body={
+            "event_id": "Ev-confirm-action-2",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "confirm"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert export_executor.requests == [
+        (
+            client,
+            ExportRequest(key=key, file_id="F1", target_ratio="3:4"),
+        )
+    ]
+
+
+def test_ratio_action_duplicate_and_invalid_payloads_are_safe_and_idempotent() -> None:
+    export_executor = RecordingExportExecutor()
+    handler, store = make_handler(export_executor=export_executor)
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-export-action-3",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "export"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    duplicate_body = {
+        "team": {"id": "T1"},
+        "channel": {"id": "C1"},
+        "container": {"channel_id": "C1", "message_ts": "171.0001"},
+        "message": {"thread_ts": "170.0001", "ts": "171.0001"},
+        "actions": [
+            {
+                "action_id": EXPORT_RATIO_ACTION_ID,
+                "action_ts": "172.0003",
+                "selected_option": {"value": "4:3"},
+            }
+        ],
+    }
+    handler.handle_export_ratio_action(body=duplicate_body, ack=lambda: None, client=client)
+    handler.handle_export_ratio_action(body=duplicate_body, ack=lambda: None, client=client)
+    handler.handle_export_ratio_action(
+        body={
+            "team": {"id": "T1"},
+            "channel": {"id": "C1"},
+            "container": {"channel_id": "C1", "message_ts": "171.9999"},
+            "message": {"thread_ts": "170.0001", "ts": "171.9999"},
+            "actions": [
+                {
+                    "action_id": EXPORT_RATIO_ACTION_ID,
+                    "action_ts": "172.0004",
+                    "selected_option": {"value": "21:9"},
+                }
+            ],
+        },
+        ack=lambda: None,
+        client=client,
+    )
+    handler.handle_message(
+        body={
+            "event_id": "Ev-cancel-action-3",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "cancel"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+    handler.handle_export_ratio_action(
+        body={
+            "team": {"id": "T1"},
+            "channel": {"id": "C1"},
+            "container": {"channel_id": "C1", "message_ts": "171.0001"},
+            "message": {"thread_ts": "170.0001", "ts": "171.0001"},
+            "actions": [
+                {
+                    "action_id": EXPORT_RATIO_ACTION_ID,
+                    "action_ts": "172.0005",
+                    "selected_option": {"value": "3:4"},
+                }
+            ],
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert export_executor.requests == []
+    assert len([payload for name, payload in client.calls if name == "chat_update"]) == 1
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.CANCELLATION_CONSUMED
 
 
 def test_cancel_active_explanation_requests_cooperative_cancellation() -> None:
@@ -792,4 +1002,4 @@ def test_register_slack_handlers_wires_file_and_message_events() -> None:
 
     register_slack_handlers(app, handler)
 
-    assert sorted(app.handlers) == ["file_shared", "message"]
+    assert sorted(app.handlers) == ["action:export_ratio_select", "file_shared", "message"]

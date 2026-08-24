@@ -128,6 +128,35 @@ def test_session_store_isolates_pending_export_by_thread() -> None:
     assert second_session.status is SessionStatus.VIDEO_RECEIVED
 
 
+def test_session_store_updates_pending_export_ratio_and_rejects_stale_or_unknown_selection() -> None:
+    store = ThreadSessionStore()
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+    bound = store.bind_pending_export_message(key, message_ts="171.1")
+    selected = store.select_export_ratio(key, target_ratio="4:3", message_ts="171.1")
+    duplicate = store.select_export_ratio(key, target_ratio="4:3", message_ts="171.1")
+    stale = store.select_export_ratio(key, target_ratio="3:4", message_ts="171.2")
+    invalid = store.select_export_ratio(key, target_ratio="21:9", message_ts="171.1")
+    confirmed = store.apply_command(key, CanonicalCommand.CONFIRM)
+
+    assert bound.reason == "export_message_bound"
+    assert selected.reason == "export_ratio_selected"
+    assert selected.session is not None
+    assert selected.session.pending_export is not None
+    assert selected.session.pending_export.target_ratio == "4:3"
+    assert selected.session.pending_export.message_ts == "171.1"
+    assert duplicate.reason == "export_ratio_unchanged"
+    assert stale.reason == "stale_pending_export"
+    assert invalid.reason == "invalid_ratio"
+    assert confirmed.export_request == ExportRequest(
+        key=key,
+        file_id="F1",
+        target_ratio="4:3",
+    )
+
+
 def test_session_store_can_roll_back_failed_explain_start_for_retry() -> None:
     store = ThreadSessionStore()
     key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
