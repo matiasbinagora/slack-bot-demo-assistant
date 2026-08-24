@@ -1,6 +1,6 @@
 # Local Slack App and Socket Mode setup
 
-This document covers the local-only Slack foundation implemented for `DAY-2-TASK-002`.
+This document covers the local-only Slack foundation implemented for `DAY-2-TASK-002` and the interactive export ratio selection added in `DAY-12-TASK-018`.
 
 ## Scope of this setup
 
@@ -13,7 +13,9 @@ This document covers the local-only Slack foundation implemented for `DAY-2-TASK
 
 - Live Slack workspace QA.
 - Public HTTP webhook / Events API deployment.
-- Video processing, file downloads, thread command handlers, Claude integration, or persistent storage.
+- Live Slack workspace QA claims beyond explicitly run local/manual evidence.
+- Public HTTP webhook / Events API deployment.
+- Persistent storage, arbitrary ratios, smart crop, padding, or credential value changes.
 
 ## Environment variables
 
@@ -61,12 +63,19 @@ If either Slack token is missing, the process exits safely and logs a configurat
    - `files:read`
    - `chat:write`
 5. Configure the currently known event subscription:
-   - `file_shared`
-6. Keep future thread-message subscriptions pending confirmation for follow-up tasks:
-   - thread messages for `explain`
-   - thread messages for `export`
-   - thread messages for `confirm`
-   - thread messages for `cancel`
+    - `file_shared`
+6. Configure the currently known thread message subscription used by the local command flow:
+    - `message` events for `explain`, `export`, `confirm`, and `cancel`
+7. Enable **Interactivity & Shortcuts** for the same app so Slack can deliver the export ratio `static_select` action through Socket Mode.
+8. Keep Socket Mode as the transport. Do **not** add a public request URL for this MVP slice.
+
+## Export ratio interaction
+
+- The `export` command posts a Block Kit `static_select` in the same thread.
+- The only approved export ratios are `16:9`, `9:16`, `1:1`, `4:3`, and `3:4`.
+- `16:9` is selected by default.
+- Changing the ratio only updates the pending suggestion. It does **not** download media, run FFmpeg, run FFprobe export validation, or publish an output.
+- Users still reply with typed `confirm` to start the export or `cancel` to stop it.
 
 ## Pending workspace-dependent permissions
 
@@ -75,6 +84,7 @@ The exact additional permissions may vary by workspace policy, channel type, and
 ## Local validation
 
 - Tests run with mocked Slack Bolt / Socket Mode behavior only.
+- Interactive action coverage also uses mocked Slack payloads and mocked clients only.
 - No Slack credentials are required for the repository test suite.
 - No live network, live Slack workspace, or live Claude account is required for this task.
-- Slack live QA and Claude live calls were not run for this repository slice.
+- Slack live QA and Claude live calls were not run for this repository slice unless separately recorded as manual evidence.

@@ -90,11 +90,11 @@ def _runtime_redaction_input() -> str:
     return f"token={token} url={url} path={path}"
 
 
-def make_request() -> ExportRequest:
+def make_request(*, target_ratio: str = "16:9") -> ExportRequest:
     return ExportRequest(
         key=SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001"),
         file_id="F1",
-        target_ratio="16:9",
+        target_ratio=target_ratio,
     )
 
 
@@ -219,3 +219,21 @@ def test_export_orchestrator_logs_redacted_upload_failure_and_attempts_cleanup(
     assert "[REDACTED_TOKEN]" in caplog.text
     assert "[REDACTED_URL]" in caplog.text
     assert "[REDACTED_PATH]" in caplog.text
+
+
+def test_export_orchestrator_publishes_selected_four_by_three_ratio(tmp_path: Path) -> None:
+    fixture = build_mp4_fixture(tmp_path, name="ratio-4x3", with_audio=True, duration_seconds=1, size="160x90")
+    client = RecordingSlackClient()
+    orchestrator = ExportOrchestrator(
+        file_adapter_factory=lambda _: RecordingAdapter(fixture),
+        executor=ImmediateExecutor(),
+        logger=logging.getLogger("tests.export_orchestrator.ratio_4x3"),
+        temp_root=tmp_path / "work",
+    )
+
+    orchestrator.submit(client=client, request=make_request(target_ratio="4:3"))
+
+    upload_calls = [payload for name, payload in client.calls if name == "files_upload_v2"]
+    assert len(upload_calls) == 1
+    assert upload_calls[0]["filename"] == "export-4x3.mp4"
+    assert "4:3" in upload_calls[0]["title"]

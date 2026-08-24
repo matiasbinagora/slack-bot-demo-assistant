@@ -4,7 +4,7 @@ Local-first Slack bot for understanding and exporting short videos.
 
 ## Status
 
-This repository currently contains the OpenCode and Orca agent bootstrap, project governance rules, and the initial product contract. The Slack application is not implemented yet.
+This repository contains the local Python Slack Bolt application, Socket Mode runtime seams, thread-scoped session handling, explanation orchestration, interactive export ratio selection, and the FFmpeg/FFprobe-backed export pipeline used by the mocked local QA flow.
 
 ## Product Goal
 
@@ -14,7 +14,7 @@ The bot will let a user upload an MP4 video to Slack and interact with it in Eng
 2. Ask what the video is about.
 3. Receive an English summary with key points and timestamps when available.
 4. Request an export format or aspect ratio.
-5. Receive a suggested format and centered crop for confirmation.
+5. Receive a suggested format and centered crop for confirmation, including the approved Slack ratio selector with `16:9`, `9:16`, `1:1`, `4:3`, and `3:4`.
 6. Receive an H.264/AAC MP4 export after confirmation.
 
 Temporary videos, frames, transcripts, and generated outputs are deleted after processing.
@@ -125,16 +125,17 @@ This repository now includes the local Python entrypoint and environment-backed 
    - `chat:write`
 4. Subscribe to the known event for this slice and document future subscriptions:
    - current planned event: `file_shared`
-   - future planned thread-message subscription: message events needed for thread commands such as `explain`, `export`, `confirm`, and `cancel`
-5. Treat workspace-, channel-, and Slack-plan-dependent permissions as pending confirmation before any live workspace QA or scope mutation.
-6. Install the app to the target workspace only after the required permissions are confirmed by a human.
+   - current planned thread-message subscription: `message` events needed for thread commands such as `explain`, `export`, `confirm`, and `cancel`
+5. Enable **Interactivity & Shortcuts** so the export ratio `static_select` action is delivered over Socket Mode.
+6. Treat workspace-, channel-, and Slack-plan-dependent permissions as pending confirmation before any live workspace QA or scope mutation.
+7. Install the app to the target workspace only after the required permissions are confirmed by a human.
 
 ### Validation notes
 
 - Current QA is local only and uses mocked Slack Bolt, Socket Mode, thread-command, and authenticated-download behavior.
 - No live Slack workspace QA was run for this repository slice.
-- This slice adds Slack event handling, thread state, and a secure Slack file download adapter only.
-- This slice does not add Claude integration, FFmpeg or FFprobe processing, automatic download on file_shared, media understanding, or export generation.
+- The current repository includes Claude analysis, FFmpeg/FFprobe media processing, explanation orchestration, and export generation code paths, but the validation evidence for this slice remains local and mock-driven.
+- Live Slack, live Anthropic, and live workspace permission validation remain out of scope unless they are executed and reported separately.
 
 ## Quality Gates
 

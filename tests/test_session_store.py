@@ -1,3 +1,5 @@
+import threading
+
 from slack_video_assistant.session_store import (
     CanonicalCommand,
     ExportRequest,
@@ -126,6 +128,159 @@ def test_session_store_isolates_pending_export_by_thread() -> None:
     assert first_session.status is SessionStatus.EXPORT_PENDING
     assert second_session is not None
     assert second_session.status is SessionStatus.VIDEO_RECEIVED
+
+
+def test_session_store_updates_pending_export_ratio_and_rejects_stale_or_unknown_selection() -> None:
+    store = ThreadSessionStore()
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+    bound = store.bind_pending_export_message(key, message_ts="171.1")
+    selected = store.select_export_ratio(key, target_ratio="4:3", message_ts="171.1")
+    duplicate = store.select_export_ratio(key, target_ratio="4:3", message_ts="171.1")
+    stale = store.select_export_ratio(key, target_ratio="3:4", message_ts="171.2")
+    invalid = store.select_export_ratio(key, target_ratio="21:9", message_ts="171.1")
+    confirmed = store.apply_command(key, CanonicalCommand.CONFIRM)
+
+    assert bound.reason == "export_message_bound"
+    assert selected.reason == "export_ratio_selected"
+    assert selected.session is not None
+    assert selected.session.pending_export is not None
+    assert selected.session.pending_export.target_ratio == "4:3"
+    assert selected.session.pending_export.message_ts == "171.1"
+    assert duplicate.reason == "export_ratio_unchanged"
+    assert stale.reason == "stale_pending_export"
+    assert invalid.reason == "invalid_ratio"
+    assert confirmed.export_request == ExportRequest(
+        key=key,
+        file_id="F1",
+        target_ratio="4:3",
+    )
+
+
+def test_session_store_rejects_ratio_action_without_message_ts_when_pending_export_is_bound() -> None:
+    store = ThreadSessionStore()
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+    store.bind_pending_export_message(key, message_ts="171.1")
+
+    missing_message_ts = store.select_export_ratio(key, target_ratio="4:3", message_ts=None)
+
+    assert missing_message_ts.reason == "missing_action_message_ts"
+    assert missing_message_ts.state_changed is False
+    session = store.get(key)
+    assert session is not None
+    assert session.pending_export is not None
+    assert session.pending_export.target_ratio == "16:9"
+    assert session.pending_export.message_ts == "171.1"
+
+
+def test_session_store_serializes_ratio_selection_before_confirmation_under_concurrency() -> None:
+    selected_ratio_entered = threading.Event()
+    allow_ratio_selection_to_finish = threading.Event()
+    confirm_finished = threading.Event()
+
+    def transition_hook(transition_name: str, transition_key: SessionKey) -> None:
+        assert transition_key == key
+        if transition_name == "select_export_ratio":
+            selected_ratio_entered.set()
+            assert allow_ratio_selection_to_finish.wait(timeout=1)
+
+    store = ThreadSessionStore(transition_hook=transition_hook)
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+    store.bind_pending_export_message(key, message_ts="171.1")
+
+    ratio_thread = threading.Thread(
+        target=lambda: store.select_export_ratio(key, target_ratio="4:3", message_ts="171.1")
+    )
+    ratio_thread.start()
+    assert selected_ratio_entered.wait(timeout=1)
+
+    confirm_result: dict[str, object] = {}
+
+    def _confirm() -> None:
+        confirm_result["result"] = store.apply_command(key, CanonicalCommand.CONFIRM)
+        confirm_finished.set()
+
+    confirm_thread = threading.Thread(target=_confirm)
+    confirm_thread.start()
+
+    assert confirm_finished.wait(timeout=0.1) is False
+    allow_ratio_selection_to_finish.set()
+
+    ratio_thread.join(timeout=1)
+    confirm_thread.join(timeout=1)
+
+    assert not ratio_thread.is_alive()
+    assert not confirm_thread.is_alive()
+    result = confirm_result["result"]
+    assert result.export_request == ExportRequest(
+        key=key,
+        file_id="F1",
+        target_ratio="4:3",
+    )
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.CONFIRMATION_CONSUMED
+
+
+def test_session_store_allows_exactly_one_concurrent_confirm_after_ratio_selection() -> None:
+    store = ThreadSessionStore()
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+    store.bind_pending_export_message(key, message_ts="171.1")
+    selected = store.select_export_ratio(key, target_ratio="4:3", message_ts="171.1")
+
+    assert selected.session is not None
+    assert selected.session.pending_export is not None
+    assert selected.session.pending_export.target_ratio == "4:3"
+
+    start_barrier = threading.Barrier(3)
+    results: list[TransitionResult] = []
+    results_lock = threading.Lock()
+
+    def _confirm() -> None:
+        start_barrier.wait(timeout=1)
+        result = store.apply_command(key, CanonicalCommand.CONFIRM)
+        with results_lock:
+            results.append(result)
+
+    confirm_threads = [threading.Thread(target=_confirm) for _ in range(2)]
+    for thread in confirm_threads:
+        thread.start()
+
+    start_barrier.wait(timeout=1)
+
+    for thread in confirm_threads:
+        thread.join(timeout=1)
+
+    assert all(not thread.is_alive() for thread in confirm_threads)
+    assert len(results) == 2
+
+    successful_results = [
+        result
+        for result in results
+        if result.export_request == ExportRequest(key=key, file_id="F1", target_ratio="4:3")
+    ]
+    rejected_results = [result for result in results if result.reason == "missing_pending_export"]
+
+    assert len(successful_results) == 1
+    assert successful_results[0].state_changed is True
+    assert len(rejected_results) == 1
+    assert rejected_results[0].state_changed is False
+    assert rejected_results[0].export_request is None
+
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.CONFIRMATION_CONSUMED
 
 
 def test_session_store_can_roll_back_failed_explain_start_for_retry() -> None:

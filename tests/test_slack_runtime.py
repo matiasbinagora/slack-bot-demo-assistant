@@ -18,6 +18,13 @@ class FakeApp:
 
         return _register
 
+    def action(self, name: str):
+        def _register(handler):
+            self.handlers[f"action:{name}"] = handler
+            return handler
+
+        return _register
+
 
 def test_build_slack_runtime_passes_environment_settings_and_logger_to_factories() -> None:
     settings = SlackSettings(
@@ -50,7 +57,7 @@ def test_build_slack_runtime_passes_environment_settings_and_logger_to_factories
 
     assert runtime.app is app
     assert runtime.handler is handler
-    assert sorted(app.handlers) == ["file_shared", "message"]
+    assert sorted(app.handlers) == ["action:export_ratio_select", "file_shared", "message"]
     assert calls == {
         "app_token": "xoxb-test-token",
         "app_logger": logger,
@@ -101,6 +108,13 @@ def test_build_slack_runtime_registers_file_shared_and_message_handlers() -> Non
 
             return _register
 
+        def action(self, name: str):
+            def _register(handler):
+                registered[f"action:{name}"] = handler
+                return handler
+
+            return _register
+
     def app_factory(*, token: str, logger: logging.Logger) -> object:
         assert token == "xoxb-test-token"
         assert logger.name == "tests.slack_runtime.handlers"
@@ -119,7 +133,7 @@ def test_build_slack_runtime_registers_file_shared_and_message_handlers() -> Non
         handler_factory=handler_factory,
     )
 
-    assert sorted(registered) == ["file_shared", "message"]
+    assert sorted(registered) == ["action:export_ratio_select", "file_shared", "message"]
     assert runtime.app is not None
 
 

@@ -78,11 +78,13 @@ def build_slack_runtime(
             temp_root=prepared_temp_root,
         )
 
+    session_store = ThreadSessionStore()
+
     register_slack_handlers(
         app,
         SlackEventHandler(
             file_adapter_factory=_file_adapter_factory,
-            session_store=ThreadSessionStore(),
+            session_store=session_store,
             processed_events=ProcessedEventStore(),
             logger=logger,
             explanation_orchestrator=ExplanationOrchestrator(

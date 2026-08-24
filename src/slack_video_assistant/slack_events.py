@@ -9,8 +9,10 @@ from slack_video_assistant.logging_utils import redact_sensitive
 from slack_video_assistant.session_store import (
     CanonicalCommand,
     ExportExecutor,
+    ExportSuggestion,
     SessionKey,
     SessionStatus,
+    SUPPORTED_EXPORT_RATIOS,
     ThreadSessionStore,
     TransitionResult,
 )
@@ -18,6 +20,7 @@ from slack_video_assistant.slack_file_adapter import SlackAdapterError, SlackFil
 
 
 AckCallable = Callable[[], None]
+EXPORT_RATIO_ACTION_ID = "export_ratio_select"
 
 
 @dataclass(frozen=True)
@@ -171,6 +174,15 @@ class SlackEventHandler:
             command,
             explanation_cancel_status=explanation_cancel_status,
         )
+        if command is CanonicalCommand.EXPORT and result.reason == "export_pending" and result.session:
+            self._publish_export_suggestion(
+                client,
+                channel=context.channel_id,
+                thread_ts=context.thread_ts,
+                key=key,
+                pending_export=result.session.pending_export,
+            )
+            return
         if command is CanonicalCommand.EXPLAIN and result.reason == "explanation_requested" and result.session:
             try:
                 if self._explanation_orchestrator is None:
@@ -222,6 +234,37 @@ class SlackEventHandler:
             text=_message_for_transition(command, result),
         )
 
+    def handle_export_ratio_action(self, *, body: Mapping[str, Any], ack: AckCallable, client: Any) -> None:
+        ack()
+        if not self._processed_events.mark_processed(_interactive_action_id(body)):
+            return
+
+        context = _action_thread_context(body)
+        if not context.team_id or not context.channel_id or not context.thread_ts:
+            return
+
+        selected_ratio = _selected_ratio(body)
+        message_ts = _action_message_ts(body)
+        key = SessionKey(
+            team_id=context.team_id,
+            channel_id=context.channel_id,
+            thread_ts=context.thread_ts,
+        )
+        result = self._session_store.select_export_ratio(
+            key,
+            target_ratio=selected_ratio,
+            message_ts=message_ts,
+        )
+        if result.reason not in {"export_ratio_selected", "export_ratio_unchanged"} or result.session is None:
+            return
+        self._update_export_suggestion(
+            client,
+            channel=context.channel_id,
+            key=key,
+            pending_export=result.session.pending_export,
+            fallback_thread_ts=context.thread_ts,
+        )
+
     def _post_message(
         self,
         client: Any,
@@ -229,14 +272,75 @@ class SlackEventHandler:
         channel: str,
         text: str,
         thread_ts: str | None = None,
-    ) -> None:
+        blocks: list[dict[str, Any]] | None = None,
+    ) -> Mapping[str, Any] | None:
         payload: dict[str, Any] = {"channel": channel, "text": text}
         if thread_ts:
             payload["thread_ts"] = thread_ts
+        if blocks is not None:
+            payload["blocks"] = blocks
         try:
-            client.chat_postMessage(**payload)
+            response = client.chat_postMessage(**payload)
+            return response if isinstance(response, Mapping) else None
         except Exception as exc:
             self._logger.error("Slack message publish failed: %s", redact_sensitive(exc))
+            return None
+
+    def _publish_export_suggestion(
+        self,
+        client: Any,
+        *,
+        channel: str,
+        thread_ts: str,
+        key: SessionKey,
+        pending_export: ExportSuggestion | None,
+    ) -> None:
+        if pending_export is None:
+            return
+        response = self._post_message(
+            client,
+            channel=channel,
+            thread_ts=thread_ts,
+            text=_export_suggestion_text(pending_export.target_ratio),
+            blocks=_export_suggestion_blocks(pending_export.target_ratio),
+        )
+        message_ts = str(response.get("ts", "")).strip() if response else ""
+        if message_ts:
+            self._session_store.bind_pending_export_message(key, message_ts=message_ts)
+
+    def _update_export_suggestion(
+        self,
+        client: Any,
+        *,
+        channel: str,
+        key: SessionKey,
+        pending_export: ExportSuggestion | None,
+        fallback_thread_ts: str,
+    ) -> None:
+        if pending_export is None:
+            return
+        if pending_export.message_ts:
+            try:
+                client.chat_update(
+                    channel=channel,
+                    ts=pending_export.message_ts,
+                    text=_export_suggestion_text(pending_export.target_ratio),
+                    blocks=_export_suggestion_blocks(pending_export.target_ratio),
+                )
+                return
+            except Exception as exc:
+                self._logger.error("Slack message update failed: %s", redact_sensitive(exc))
+
+        response = self._post_message(
+            client,
+            channel=channel,
+            thread_ts=fallback_thread_ts,
+            text=_export_suggestion_text(pending_export.target_ratio),
+            blocks=_export_suggestion_blocks(pending_export.target_ratio),
+        )
+        rebound_message_ts = str(response.get("ts", "")).strip() if response else ""
+        if rebound_message_ts:
+            self._session_store.bind_pending_export_message(key, message_ts=rebound_message_ts)
 
     def _notify_file_share_failure(self, *, client: Any, context: ThreadContext) -> None:
         if not context.channel_id:
@@ -262,6 +366,10 @@ def register_slack_handlers(app: Any, handler: SlackEventHandler) -> None:
     @app.event("message")
     def _on_message(body: Mapping[str, Any], ack: AckCallable, client: Any) -> None:
         handler.handle_message(body=body, ack=ack, client=client)
+
+    @app.action(EXPORT_RATIO_ACTION_ID)
+    def _on_export_ratio_action(ack: AckCallable, body: Mapping[str, Any], client: Any) -> None:
+        handler.handle_export_ratio_action(body=body, ack=ack, client=client)
 
 
 def _event(body: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -394,11 +502,6 @@ def _message_for_transition(command: CanonicalCommand, result: TransitionResult)
 
     if command is CanonicalCommand.EXPORT:
         pending_ratio = result.session.pending_export.target_ratio if result.session and result.session.pending_export else "16:9"
-        if result.reason == "export_pending":
-            return (
-                f"I suggest a {pending_ratio} MP4 export with a centered crop for this MVP. "
-                "Reply with `confirm` to continue or `cancel` to stop."
-            )
         if result.reason == "export_no_longer_available":
             return "This thread has already finished its export decision. Please share a new MP4 in a new thread to start over."
         return (
@@ -428,4 +531,81 @@ def _message_for_executor_handoff(result: TransitionResult) -> str:
     return (
         f"Confirmation recorded. I handed the approved {ratio} centered-crop export request "
         "to the next execution step."
+    )
+
+
+def _export_suggestion_text(target_ratio: str) -> str:
+    return (
+        f"I suggest a {target_ratio} MP4 export with a centered crop for this MVP. "
+        "Choose one of the approved ratios below, then reply with `confirm` to continue or `cancel` to stop."
+    )
+
+
+def _export_suggestion_blocks(target_ratio: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Suggested export:* `{target_ratio}` MP4 with a centered crop for this MVP.\n"
+                    "Choose one of the approved ratios below, then reply with `confirm` to continue or `cancel` to stop."
+                ),
+            },
+            "accessory": {
+                "type": "static_select",
+                "action_id": EXPORT_RATIO_ACTION_ID,
+                "placeholder": {"type": "plain_text", "text": "Select an export ratio"},
+                "initial_option": _export_ratio_option(target_ratio),
+                "options": [_export_ratio_option(ratio) for ratio in SUPPORTED_EXPORT_RATIOS],
+            },
+        }
+    ]
+
+
+def _export_ratio_option(ratio: str) -> dict[str, Any]:
+    return {
+        "text": {"type": "plain_text", "text": ratio},
+        "value": ratio,
+    }
+
+
+def _interactive_action_id(body: Mapping[str, Any]) -> str | None:
+    actions = body.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return None
+    first = actions[0] if isinstance(actions[0], Mapping) else {}
+    container = body.get("container") if isinstance(body.get("container"), Mapping) else {}
+    return \
+        f"action:{container.get('message_ts', '')}:{first.get('action_id', '')}:{first.get('action_ts', '')}:{_selected_ratio(body)}"
+
+
+def _selected_ratio(body: Mapping[str, Any]) -> str:
+    actions = body.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return ""
+    first = actions[0]
+    if not isinstance(first, Mapping):
+        return ""
+    selected_option = first.get("selected_option")
+    if not isinstance(selected_option, Mapping):
+        return ""
+    return str(selected_option.get("value", "")).strip()
+
+
+def _action_message_ts(body: Mapping[str, Any]) -> str | None:
+    container = body.get("container") if isinstance(body.get("container"), Mapping) else {}
+    message_ts = str(container.get("message_ts", "")).strip()
+    return message_ts or None
+
+
+def _action_thread_context(body: Mapping[str, Any]) -> ThreadContext:
+    container = body.get("container") if isinstance(body.get("container"), Mapping) else {}
+    message = body.get("message") if isinstance(body.get("message"), Mapping) else {}
+    channel = body.get("channel") if isinstance(body.get("channel"), Mapping) else {}
+    team = body.get("team") if isinstance(body.get("team"), Mapping) else {}
+    return ThreadContext(
+        team_id=str(team.get("id", "") or _team_id(body)).strip(),
+        channel_id=str(container.get("channel_id", "") or channel.get("id", "")).strip(),
+        thread_ts=str(message.get("thread_ts", "") or container.get("thread_ts", "")).strip() or None,
     )
