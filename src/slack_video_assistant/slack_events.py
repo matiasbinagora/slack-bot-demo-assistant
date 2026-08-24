@@ -260,6 +260,7 @@ class SlackEventHandler:
         self._update_export_suggestion(
             client,
             channel=context.channel_id,
+            key=key,
             pending_export=result.session.pending_export,
             fallback_thread_ts=context.thread_ts,
         )
@@ -312,6 +313,7 @@ class SlackEventHandler:
         client: Any,
         *,
         channel: str,
+        key: SessionKey,
         pending_export: ExportSuggestion | None,
         fallback_thread_ts: str,
     ) -> None:
@@ -329,13 +331,16 @@ class SlackEventHandler:
             except Exception as exc:
                 self._logger.error("Slack message update failed: %s", redact_sensitive(exc))
 
-        self._post_message(
+        response = self._post_message(
             client,
             channel=channel,
             thread_ts=fallback_thread_ts,
             text=_export_suggestion_text(pending_export.target_ratio),
             blocks=_export_suggestion_blocks(pending_export.target_ratio),
         )
+        rebound_message_ts = str(response.get("ts", "")).strip() if response else ""
+        if rebound_message_ts:
+            self._session_store.bind_pending_export_message(key, message_ts=rebound_message_ts)
 
     def _notify_file_share_failure(self, *, client: Any, context: ThreadContext) -> None:
         if not context.channel_id:

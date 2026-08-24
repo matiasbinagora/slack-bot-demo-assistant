@@ -4,7 +4,7 @@ Local-first Slack bot for understanding and exporting short videos.
 
 ## Status
 
-This repository currently contains the OpenCode and Orca agent bootstrap, project governance rules, and the initial product contract. The Slack application is not implemented yet.
+This repository contains the local Python Slack Bolt application, Socket Mode runtime seams, thread-scoped session handling, explanation orchestration, interactive export ratio selection, and the FFmpeg/FFprobe-backed export pipeline used by the mocked local QA flow.
 
 ## Product Goal
 
@@ -134,8 +134,8 @@ This repository now includes the local Python entrypoint and environment-backed 
 
 - Current QA is local only and uses mocked Slack Bolt, Socket Mode, thread-command, and authenticated-download behavior.
 - No live Slack workspace QA was run for this repository slice.
-- This slice adds Slack event handling, thread state, interactive export ratio selection, and a secure Slack file download adapter only.
-- This slice does not add Claude integration, FFmpeg or FFprobe processing, automatic download on file_shared, media understanding, or export generation.
+- The current repository includes Claude analysis, FFmpeg/FFprobe media processing, explanation orchestration, and export generation code paths, but the validation evidence for this slice remains local and mock-driven.
+- Live Slack, live Anthropic, and live workspace permission validation remain out of scope unless they are executed and reported separately.
 
 ## Quality Gates
 

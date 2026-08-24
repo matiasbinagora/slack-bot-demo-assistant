@@ -40,6 +40,19 @@ class FakeSlackClient:
         return {"ts": payload["ts"]}
 
 
+class FailOnceUpdatingSlackClient(FakeSlackClient):
+    def __init__(self, file_response: dict[str, Any]) -> None:
+        super().__init__(file_response)
+        self._failed = False
+
+    def chat_update(self, **payload: Any) -> None:
+        self.calls.append(("chat_update", payload))
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("message_not_found")
+        return {"ts": payload["ts"]}
+
+
 class ExplodingSlackClient(FakeSlackClient):
     def __init__(self) -> None:
         super().__init__({})
@@ -625,6 +638,111 @@ def test_ratio_action_confirm_uses_latest_selected_ratio() -> None:
             ExportRequest(key=key, file_id="F1", target_ratio="3:4"),
         )
     ]
+
+
+def test_ratio_action_rejects_missing_message_ts_when_pending_export_message_is_bound() -> None:
+    handler, store = make_handler()
+    client = FakeSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-export-action-missing-ts",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "export"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    handler.handle_export_ratio_action(
+        body={
+            "team": {"id": "T1"},
+            "channel": {"id": "C1"},
+            "container": {"channel_id": "C1"},
+            "message": {"thread_ts": "170.0001", "ts": "171.0001"},
+            "actions": [
+                {
+                    "action_id": EXPORT_RATIO_ACTION_ID,
+                    "action_ts": "172.1001",
+                    "selected_option": {"value": "4:3"},
+                }
+            ],
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    assert [payload for name, payload in client.calls if name == "chat_update"] == []
+    session = store.get(key)
+    assert session is not None
+    assert session.pending_export is not None
+    assert session.pending_export.target_ratio == "16:9"
+    assert session.pending_export.message_ts == "171.0001"
+
+
+def test_ratio_action_rebinds_pending_export_after_update_fallback_so_next_action_stays_usable() -> None:
+    handler, store = make_handler()
+    client = FailOnceUpdatingSlackClient(make_file_response())
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.0001")
+    store.receive_video(key, file_id="F1")
+
+    handler.handle_message(
+        body={
+            "event_id": "Ev-export-action-rebind",
+            "team_id": "T1",
+            "event": {"type": "message", "channel": "C1", "thread_ts": "170.0001", "text": "export"},
+        },
+        ack=lambda: None,
+        client=client,
+    )
+
+    first_action = {
+        "team": {"id": "T1"},
+        "channel": {"id": "C1"},
+        "container": {"channel_id": "C1", "message_ts": "171.0001"},
+        "message": {"thread_ts": "170.0001", "ts": "171.0001"},
+        "actions": [
+            {
+                "action_id": EXPORT_RATIO_ACTION_ID,
+                "action_ts": "172.2001",
+                "selected_option": {"value": "4:3"},
+            }
+        ],
+    }
+    handler.handle_export_ratio_action(body=first_action, ack=lambda: None, client=client)
+
+    rebound_session = store.get(key)
+    assert rebound_session is not None
+    assert rebound_session.pending_export is not None
+    assert rebound_session.pending_export.target_ratio == "4:3"
+    assert rebound_session.pending_export.message_ts == "171.0002"
+
+    second_action = {
+        "team": {"id": "T1"},
+        "channel": {"id": "C1"},
+        "container": {"channel_id": "C1", "message_ts": "171.0002"},
+        "message": {"thread_ts": "170.0001", "ts": "171.0002"},
+        "actions": [
+            {
+                "action_id": EXPORT_RATIO_ACTION_ID,
+                "action_ts": "172.2002",
+                "selected_option": {"value": "3:4"},
+            }
+        ],
+    }
+    handler.handle_export_ratio_action(body=second_action, ack=lambda: None, client=client)
+
+    update_payloads = [payload for name, payload in client.calls if name == "chat_update"]
+    post_payloads = [payload for name, payload in client.calls if name == "chat_postMessage"]
+    assert [payload["ts"] for payload in update_payloads] == ["171.0001", "171.0002"]
+    assert len(post_payloads) == 2
+    final_session = store.get(key)
+    assert final_session is not None
+    assert final_session.pending_export is not None
+    assert final_session.pending_export.target_ratio == "3:4"
+    assert final_session.pending_export.message_ts == "171.0002"
 
 
 def test_ratio_action_duplicate_and_invalid_payloads_are_safe_and_idempotent() -> None:
