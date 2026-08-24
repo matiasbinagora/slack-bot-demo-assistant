@@ -230,6 +230,59 @@ def test_session_store_serializes_ratio_selection_before_confirmation_under_conc
     assert session.status is SessionStatus.CONFIRMATION_CONSUMED
 
 
+def test_session_store_allows_exactly_one_concurrent_confirm_after_ratio_selection() -> None:
+    store = ThreadSessionStore()
+    key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
+
+    store.receive_video(key, file_id="F1")
+    store.apply_command(key, CanonicalCommand.EXPORT)
+    store.bind_pending_export_message(key, message_ts="171.1")
+    selected = store.select_export_ratio(key, target_ratio="4:3", message_ts="171.1")
+
+    assert selected.session is not None
+    assert selected.session.pending_export is not None
+    assert selected.session.pending_export.target_ratio == "4:3"
+
+    start_barrier = threading.Barrier(3)
+    results: list[TransitionResult] = []
+    results_lock = threading.Lock()
+
+    def _confirm() -> None:
+        start_barrier.wait(timeout=1)
+        result = store.apply_command(key, CanonicalCommand.CONFIRM)
+        with results_lock:
+            results.append(result)
+
+    confirm_threads = [threading.Thread(target=_confirm) for _ in range(2)]
+    for thread in confirm_threads:
+        thread.start()
+
+    start_barrier.wait(timeout=1)
+
+    for thread in confirm_threads:
+        thread.join(timeout=1)
+
+    assert all(not thread.is_alive() for thread in confirm_threads)
+    assert len(results) == 2
+
+    successful_results = [
+        result
+        for result in results
+        if result.export_request == ExportRequest(key=key, file_id="F1", target_ratio="4:3")
+    ]
+    rejected_results = [result for result in results if result.reason == "missing_pending_export"]
+
+    assert len(successful_results) == 1
+    assert successful_results[0].state_changed is True
+    assert len(rejected_results) == 1
+    assert rejected_results[0].state_changed is False
+    assert rejected_results[0].export_request is None
+
+    session = store.get(key)
+    assert session is not None
+    assert session.status is SessionStatus.CONFIRMATION_CONSUMED
+
+
 def test_session_store_can_roll_back_failed_explain_start_for_retry() -> None:
     store = ThreadSessionStore()
     key = SessionKey(team_id="T1", channel_id="C1", thread_ts="170.1")
